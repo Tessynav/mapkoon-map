@@ -136,11 +136,16 @@ if os.path.exists(os.path.join(D, 'osm_ways.json')): OSMW = json.load(open(os.pa
 import re as _re
 
 
-def osm_way(r):
+def osm_id(r):
     best = None
     for s_ in r.get('sources') or []:
         m = _re.match(r'w(\d+)@', str(s_.get('record_id') or ''))
         if m and (best is None or not s_.get('property')): best = m.group(1)
+    return best
+
+
+def osm_way(r):
+    best = osm_id(r)
     return OSMW.get(best) if best else None
 
 
@@ -158,7 +163,7 @@ for r in seg:
         nosm += 1; ln = o.get('ln') or 0; lf = o.get('lf') or 0; lb = o.get('lb') or 0
         if 2 < (o.get('wd') or 0) < 40: w = o['wd']
     roads.append(dict(g=r['g'], cls=r['class'], sub=sub, w=w, ow=ow, lv=lv, fl=fl, id=r['id'], nm=(r.get('names') or {}).get('primary'),
-                      ln=ln, lf=lf, lb=lb, osm=bool(o)))
+                      ln=ln, lf=lf, lb=lb, osm=bool(o), osmsrc=osm_id(r) is not None))
 print('roads', len(roads), 'with OpenStreetMap lanes/width', nosm)
 
 STEP = 4.0; RAMP = 90.0; LH = 6.5   # sampling (m), ramp length (m), height per level (m)
@@ -714,7 +719,8 @@ steps = [max(v) - min(v) for v in ends.values() if len(v) > 1]
 chk['wall_at_junction'] = sum(1 for d in steps if d > 1.0)            # Nov 26: a bridge starting as a wall at a crosswalk
 chk['pier_on_road'] = 0                                               # Nov 26: piers in the middle of Autoroute 15 (placed clear of roads)
 chk['too_high_road'] = sum(1 for rd, (ss, pts, lvl), h in zip(roads, prof, H) if h.max() > 45 and owned(tile_of(*pts[0])))
-own_roads = [rd for rd, (ss, pts, lvl) in zip(roads, prof) if owned(tile_of(*pts[0]))]
+# (Nov 26: Boucherville has roads that come from TomTom, not OpenStreetMap; they can't have its lanes, so they don't count)
+own_roads = [rd for rd, (ss, pts, lvl) in zip(roads, prof) if owned(tile_of(*pts[0])) and rd.get('osmsrc')]
 chk['roads_without_osm_pct'] = round(100.0 * sum(1 for rd in own_roads if not rd.get('osm')) / len(own_roads), 1) if len(own_roads) >= 50 else 0.0
 LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0}
 failed = [k for k, v in chk.items() if v > LIMITS[k]]
