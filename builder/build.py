@@ -354,7 +354,8 @@ for r in seg:
         bx0, bz0, bx1, bz1 = landmarks.CH_BOX
         for i, (x, z) in enumerate(pts):
             t_ = landmarks.ch_height(x)
-            if t_ is not None and hh[i] > 0.15 and bx0 < x < bx1 and bz0 < z < bz1: hh[i] = max(hh[i], t_)
+            if t_ is not None and hh[i] > 0.15 and bx0 < x < bx1 and bz0 < z < bz1:
+                hh[i] = landmarks.ch_down(x) if x >= landmarks.CH_X2 else max(hh[i], t_)
     electric = r['class'] == 'light_rail' or nm == 'REM'
     i = 0
     while i < n_:
@@ -429,7 +430,9 @@ for r in seg:
     g = r['g']; wd = PATHW[c]; npath += 1
     if bridge and lv:
         pr = profile(dict(g=g, lv=lv)); ss, pts, lvl = pr
-        hh = np.array([max(t_ * LH, (landmarks.ch_height(x) or 0) if t_ > 0 and landmarks.CH_BOX[0] < x < landmarks.CH_BOX[2] and landmarks.CH_BOX[1] < z < landmarks.CH_BOX[3] else 0) for t_, (x, z) in zip(lvl, pts)])
+        inbox = lambda x, z: landmarks.CH_BOX[0] < x < landmarks.CH_BOX[2] and landmarks.CH_BOX[1] < z < landmarks.CH_BOX[3]
+        hh = np.array([(landmarks.ch_down(x) if x >= landmarks.CH_X2 else max(t_ * LH, landmarks.ch_height(x) or 0)) if t_ > 0 and inbox(x, z) else t_ * LH
+                       for t_, (x, z) in zip(lvl, pts)])
         if hh.max() > 0.5:
             # ramps at the ends, like the roads
             L_ = ss[-1]; src = [(s_, t_) for s_, t_ in zip(ss, hh) if t_ > 0]
