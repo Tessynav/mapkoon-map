@@ -16,5 +16,12 @@ idx = {'v': 2, 'format': 'MK3Q', 'lon0': LON0, 'lat0': LAT0, 'kx': KX, 'ky': KY,
 json.dump(idx, open(os.path.join(site, 'index.json'), 'w'), separators=(',', ':'))
 mb = sum(t[2] for t in tiles) / 1e6
 print('tiles', len(tiles), 'MB %.1f' % mb, 'net tiles', len(nets))
+# the builder's checks (walls at junctions, piers on roads, ...): any failed chunk stops the publish
+bad = []
+for f in glob.glob(os.path.join(site, 'checks', '*.json')):
+    c = json.load(open(f))
+    if c['failed']: bad.append((os.path.basename(f), c['failed'], c['checks']))
+for b in bad: print('CHECK FAILED in chunk', *b)
+if bad: sys.exit('map checks failed, not publishing (the live map stays as it was)')
 if len(tiles) < 0.5 * len(plan['chunks']) * 8:   # far too few tiles: stop before replacing a good map
     sys.exit('too few tiles, not publishing')
