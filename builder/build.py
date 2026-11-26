@@ -517,6 +517,7 @@ print('markings done', flush=True)
 # ---------------------------------------------------------------- buildings
 bl = load('bld')
 SHADOW_P = {}
+import random
 MH = {}
 for f in glob.glob(os.path.join(A.heights, 'heights_*.json')) if A.heights else []:
     MH.update(json.load(open(f)))
@@ -544,9 +545,18 @@ for r in bl:
     if fc and (max(hexrgb(fc)) - min(hexrgb(fc)) > 120): fc = None   # (a pure red or green wall in the data is almost always a mapping slip)
     if hgt > 35: pal = ['#8e9aa6', '#a9b4bd', '#6f7c8a', '#c3c7c9', '#7d8b96', '#b5aea3']   # towers: glass and concrete, not brick
     col = hexrgb(fc) if fc else hexrgb(pal[hid % len(pal)])
-    roof = [int(c * 0.62) for c in col] if not fc else [110, 110, 112]
     rs = r.get('roof_shape') or ''
     pitched = rs in ('gabled', 'hipped', 'saltbox') or (cls in ('house', 'detached') and area < 260 and not rs)
+    # (step 2 buildings) a facade style for the window pattern: 0 apartments, 1 shops below, 2 office tower, 3 house,
+    # 4 industrial / warehouse. The viewer draws each style's windows; it reads the style from the 'extra' value.
+    if cls in ('house', 'detached', 'semidetached_house', 'terrace', 'bungalow') or (hgt <= 9 and area < 220): style = 3
+    elif cls in ('industrial', 'warehouse', 'manufacture', 'hangar') or (cls == '' and area > 3000 and hgt < 12): style = 4
+    elif hgt > 35 or (cls in ('office', 'commercial') and hgt > 18): style = 2
+    elif cls in ('commercial', 'retail', 'supermarket', 'kiosk') or (hgt >= 9 and hgt <= 30 and hid % 4 == 0): style = 1
+    else: style = 0
+    # roofs: flat ones light gravel grey (a little different each), pitched ones dark shingle
+    if pitched: roof = [[74, 74, 79], [91, 74, 66], [107, 63, 53], [84, 86, 90]][hid % 4]
+    else: g_ = 122 + (hid >> 4) % 34; roof = [g_, g_ - 2, g_ - 6]
     for P in (g.geoms if g.geom_type == 'MultiPolygon' else [g]):
         P = P.simplify(0.3)
         if P.is_empty or P.area < 10: continue
@@ -557,12 +567,19 @@ for r in bl:
         # walls (extra = running length along the wall, for the window pattern; negative = no windows)
         pts = []; cols = []; tri = []; ex = []; run = 0.0
         win = 1.0 if (area >= 40 and cls not in ('outbuilding', 'garage', 'shed')) else -1.0
+        so = style * 20000.0 if win > 0 else 0.0
+        flat_rim = (not pitched) and area >= 120 and hgt >= 6      # a low parapet around flat roofs
         for i in range(len(ring)):
             a, b = ring[i], ring[(i + 1) % len(ring)]; ln = float(np.hypot(*(b - a)))
             base = len(pts) // 3
             pts += [a[0], mh, a[1], b[0], mh, b[1], b[0], top, b[1], a[0], top, a[1]]
-            cols += col * 4; ex += [win * (run + 0.001), win * (run + ln), win * (run + ln), win * (run + 0.001)]
-            tri += [base, base + 1, base + 2, base, base + 2, base + 3]; run += ln
+            cols += col * 4; ex += [win * (so + run + 0.001), win * (so + run + ln), win * (so + run + ln), win * (so + run + 0.001)]
+            tri += [base, base + 1, base + 2, base, base + 2, base + 3]
+            if flat_rim:
+                base = len(pts) // 3; rim = [int(c * 0.9) for c in col]
+                pts += [a[0], top, a[1], b[0], top, b[1], b[0], top + 0.8, b[1], a[0], top + 0.8, a[1]]
+                cols += rim * 4; ex += [-1.0] * 4; tri += [base, base + 1, base + 2, base, base + 2, base + 3]
+            run += ln
         Ly.add(pts, cols, tri, ex)
         # (step 2) the building's shadow on the ground: the footprint swept away from the sun by its height
         if hgt >= 3:
@@ -588,6 +605,15 @@ for r in bl:
             pts = []
             for a in v: pts += [float(a[0]), hgt, float(a[1])]
             Ly.add(pts, roof * len(v), [int(x) for x in t], [-1.0] * len(v))
+            # (step 2 buildings) machinery on big flat roofs: one to three grey boxes, always the same for a building
+            if P.area >= 500 and hgt >= 6:
+                rng = random.Random(hid); x0, z0, x1, z1 = P.bounds; nb = 1 + int(P.area > 1500) + int(P.area > 4000)
+                for _ in range(nb * 4):
+                    if nb <= 0: break
+                    cx, cz = rng.uniform(x0, x1), rng.uniform(z0, z1); a_, b_ = rng.uniform(1.5, 3.5), rng.uniform(1.2, 2.5)
+                    if not P.buffer(-3).contains(Point(cx, cz)): continue
+                    Pb, Ib = box_(cx, cz, 1.0, 0.0, a_, b_, hgt, hgt + rng.uniform(1.2, 2.4))
+                    Ly.add(Pb, [150, 152, 155] * 8, Ib, [-1.0] * 8); nb -= 1
 
 # shadows: one soft dark layer per tile (the sun from the south-west, like the light in the viewer)
 SUN = (0.6, -0.4)                       # metres of shadow per metre of height (toward the east-north-east)
