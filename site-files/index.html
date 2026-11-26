@@ -1,1 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MapKoon map data</title>
+<style>
+:root{--bg:#14171c;--fg:#e9ecf1;--sub:#9aa3b0;--acc:#f28c28}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:40px max(16px,env(safe-area-inset-left,0px))}
+h1{font-size:24px;margin:0 0 6px}h1 b{color:var(--acc)}p{color:var(--sub)}code{color:var(--fg)}
+</style></head><body><main>
+<h1><b>Map</b>Koon map data</h1>
+<p>Ready-made 3D map tiles for the MapKoon app. <span id="info"></span></p>
+<p>Map data © OpenStreetMap contributors (ODbL), Overture Maps Foundation, and Ville de Montréal (CC BY 4.0).</p>
+</main>
+<script>
+fetch('index.json').then(r=>r.json()).then(i=>{document.getElementById('info').textContent=
+  'Built '+i.built+' from Overture release '+i.overture+': '+i.tiles.length+' tiles, '+(i.tiles.reduce((a,t)=>a+t[2],0)/1e6).toFixed(0)+' MB.';}).catch(()=>{});
+</script></body></html>
 
