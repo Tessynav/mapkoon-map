@@ -108,21 +108,28 @@ else:
 lu = load('land_use'); wa = load('water'); lc = load('land_cover'); inf = load('infrastructure')
 GREEN = {'grass', 'park', 'pitch', 'playground', 'recreation_ground', 'garden', 'flowerbed', 'meadow', 'fairway', 'green',
          'tee', 'village_green', 'cemetery', 'golf_course', 'dog_park', 'allotments'}
-for r in lu:
-    g = r['g']
-    if g.geom_type not in ('Polygon', 'MultiPolygon'): continue
-    c = r.get('class')
-    if c in GREEN: flat_poly(g, 0.02, [88, 170, 70] if c != 'pitch' else [70, 160, 75], 'ground')
-    elif c == 'bunker': flat_poly(g, 0.03, [222, 205, 150], 'ground')
-for r in lc:
-    if r['subtype'] in ('forest', 'shrub'): flat_poly(r['g'], 0.015, [60, 130, 60], 'ground')
-for r in wa:
-    g = r['g']
-    if g.geom_type in ('Polygon', 'MultiPolygon') and r['class'] != 'swimming_pool': flat_poly(g, 0.01, [40, 120, 190], 'water')
-    elif r['class'] == 'swimming_pool' and g.geom_type == 'Polygon': flat_poly(g, 0.05, [90, 190, 230], 'water')
-for r in inf:
-    if r['class'] == 'parking' and r['g'].geom_type in ('Polygon', 'MultiPolygon'):
-        flat_poly(r['g'], 0.04, [96, 98, 104], 'paved')
+# (Nov 26: grass flickered) the same ground is often mapped several times (a park, its lawn, a sports field, a wood);
+# drawn on top of each other a centimetre apart, the screen can't tell which is in front from far away and they flicker.
+# Now each kind is merged, and each piece of ground is drawn once: the top kind first, the others only where it isn't.
+def merged(gs):
+    gs = [g.buffer(0) if not g.is_valid else g for g in gs if g.geom_type in ('Polygon', 'MultiPolygon')]
+    return unary_union(gs) if gs else Polygon()
+kinds = [   # (polygons, height, colour), top first
+    (merged([r['g'] for r in lu if r.get('class') == 'bunker']), 0.03, [222, 205, 150]),
+    (merged([r['g'] for r in lu if r.get('class') == 'pitch']), 0.025, [70, 160, 75]),
+    (merged([r['g'] for r in lu if r.get('class') in GREEN and r.get('class') != 'pitch']), 0.02, [88, 170, 70]),
+    (merged([r['g'] for r in lc if r['subtype'] in ('forest', 'shrub')]), 0.015, [60, 130, 60]),
+]
+covered = Polygon()
+for poly, y, col in kinds:
+    if poly.is_empty: continue
+    part = poly.difference(covered) if not covered.is_empty else poly
+    flat_poly(part, y, col, 'ground'); covered = covered.union(poly)
+water_u = merged([r['g'] for r in wa if r['class'] != 'swimming_pool'])
+flat_poly(water_u, 0.01, [40, 120, 190], 'water')
+pools = merged([r['g'] for r in wa if r['class'] == 'swimming_pool' and r['g'].geom_type == 'Polygon'])
+flat_poly(pools, 0.05, [90, 190, 230], 'water')
+flat_poly(merged([r['g'] for r in inf if r['class'] == 'parking']), 0.04, [96, 98, 104], 'paved')
 
 print('ground done', flush=True)
 # ---------------------------------------------------------------- roads
