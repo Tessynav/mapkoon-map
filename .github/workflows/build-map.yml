@@ -39,6 +39,11 @@ jobs:
           python builder/plan.py "${{ github.event.inputs.region || 'montreal' }}" plan >> "$GITHUB_OUTPUT"
           B=$(python -c "import json;print(','.join(map(str,json.load(open('plan/plan.json'))['bbox'])))")
           python builder/overture.py index "$B" plan/idx.json
+      - name: Lane counts and widths from OpenStreetMap
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
+          B=$(python -c "import json;b=json.load(open('plan/plan.json'))['bbox'];print('%f,%f,%f,%f'%(b[0]-0.01,b[1]-0.01,b[2]+0.01,b[3]+0.01))")
+          python builder/osm.py "$B" plan/osm_ways.json
       - uses: actions/upload-artifact@v4
         with: { name: plan, path: plan/, retention-days: 2 }
 
@@ -84,6 +89,7 @@ jobs:
         run: |
           read T B < <(python -c "import json;c=[c for c in json.load(open('plan/plan.json'))['chunks'] if c['id']=='${{ matrix.chunk }}'][0];print(c['tiles'],c['bbox'])")
           python builder/overture.py read plan/idx.json "$B" data
+          cp plan/osm_ways.json data/
           python builder/build.py data out --tiles="$T" --heights h
       - uses: actions/upload-artifact@v4
         with: { name: 'tiles-${{ matrix.chunk }}', path: out/, retention-days: 2 }
@@ -104,11 +110,10 @@ jobs:
         with: { pattern: 'tiles-*', path: site, merge-multiple: true }
       - run: |
           python builder/merge.py site plan/plan.json plan/idx.json
-          rm -rf site/parts
+          rm -rf site/parts site/checks
           cp site-files/* site/
           touch site/.nojekyll
       - uses: actions/upload-pages-artifact@v3
         with: { path: site }
       - id: deploy
         uses: actions/deploy-pages@v4
-
