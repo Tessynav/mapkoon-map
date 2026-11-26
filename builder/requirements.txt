@@ -1,1 +1,9 @@
+numpy
+shapely>=2.0
+mapbox-earcut
+pyarrow
+fsspec
+aiohttp
+rasterio
+pyproj
 
