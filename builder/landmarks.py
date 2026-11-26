@@ -23,6 +23,12 @@ def ch_height(x):
     return CH_TOP - (CH_TOP - CH_LOW) * ease((x - CH_X2) / (CH_X3 - CH_X2))
 
 
+def ch_down(x, xe=5690.0):
+    """the smooth descent from the top over the Seaway into Brossard (for the REM and the path; the road pieces use
+    their own landing point)"""
+    u = min(1.0, max(0.0, (x - CH_X2) / (xe - CH_X2))); return CH_TOP * (1 - u * u * (3 - 2 * u))
+
+
 def on_champlain(name, pts):
     """a piece of road (or track) that is the Champlain Bridge itself"""
     if not name or 'Samuel-De Champlain' not in name and name != 'REM': return False
@@ -36,7 +42,15 @@ def apply_heights(roads, prof, H):
     n = 0
     for rd, (ss, pts, lvl), h in zip(roads, prof, H):
         if not on_champlain(rd.get('nm'), pts): continue
+        # (Nov 26 17:06 drive: on the Brossard side the deck went from the ground to 13 m in under 200 m, then on up to
+        # 34 m) one smooth descent from the top over the Seaway down to where this piece lands in Brossard
+        xe = None
+        for k in (0, -1):
+            if h[k] < 0.3 and pts[k][0] > CH_X2 + 300: xe = pts[k][0]
         for i, (x, z) in enumerate(pts):
+            if xe is not None and x >= CH_X2:
+                u = min(1.0, max(0.0, (x - CH_X2) / max(1.0, xe - CH_X2))); h[i] = CH_TOP * (1 - u * u * (3 - 2 * u)); n += 1
+                continue
             t = ch_height(x)
             if t is not None and h[i] > 0.15: h[i] = max(h[i], t); n += 1
     return n
