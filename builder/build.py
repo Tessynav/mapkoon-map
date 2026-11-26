@@ -130,7 +130,22 @@ seg = load('segment')
 WID = {'motorway': 11.5, 'trunk': 10.5, 'primary': 14, 'secondary': 12, 'tertiary': 10, 'residential': 8.5,
        'unclassified': 7.5, 'living_street': 6, 'service': 5.5, 'unknown': 6}
 SUBW = {'link': 5.5, 'driveway': 3.6, 'parking_aisle': 6.5, 'alley': 4.2}
+# (step 2) lane counts and widths from OpenStreetMap, joined through each Overture road's OpenStreetMap way id
+OSMW = {}
+if os.path.exists(os.path.join(D, 'osm_ways.json')): OSMW = json.load(open(os.path.join(D, 'osm_ways.json')))
+import re as _re
+
+
+def osm_way(r):
+    best = None
+    for s_ in r.get('sources') or []:
+        m = _re.match(r'w(\d+)@', str(s_.get('record_id') or ''))
+        if m and (best is None or not s_.get('property')): best = m.group(1)
+    return OSMW.get(best) if best else None
+
+
 roads = []
+nosm = 0
 for r in seg:
     if r['subtype'] != 'road' or r['class'] not in WID or r['g'].geom_type != 'LineString': continue
     sub = r.get('subclass'); w = SUBW.get(sub, WID[r['class']])
@@ -138,8 +153,13 @@ for r in seg:
     acc = jl(r.get('access_restrictions')) or []
     ow = any(a.get('access_type') == 'denied' and (a.get('when') or {}).get('heading') == 'backward' and not (a.get('when') or {}).get('mode') for a in acc)
     lv = jl(r.get('level_rules')) or []; fl = jl(r.get('road_flags')) or []
-    roads.append(dict(g=r['g'], cls=r['class'], sub=sub, w=w, ow=ow, lv=lv, fl=fl, id=r['id']))
-print('roads', len(roads))
+    o = osm_way(r); ln = lf = lb = 0
+    if o:
+        nosm += 1; ln = o.get('ln') or 0; lf = o.get('lf') or 0; lb = o.get('lb') or 0
+        if 2 < (o.get('wd') or 0) < 40: w = o['wd']
+    roads.append(dict(g=r['g'], cls=r['class'], sub=sub, w=w, ow=ow, lv=lv, fl=fl, id=r['id'], nm=(r.get('names') or {}).get('primary'),
+                      ln=ln, lf=lf, lb=lb, osm=bool(o)))
+print('roads', len(roads), 'with OpenStreetMap lanes/width', nosm)
 
 STEP = 4.0; RAMP = 90.0; LH = 6.5   # sampling (m), ramp length (m), height per level (m)
 
@@ -170,8 +190,32 @@ for rd, (ss, pts, lvl) in zip(roads, prof):
     src = list(zip(ss, tgt)) + [(0.0, a), (L, b)]
     for i, s in enumerate(ss):
         h[i] = max([t - abs(s - s2) / RAMP * LH for s2, t in src if t > 0] + [0])
+    # (step 2: the low bridge on Rue Jolicoeur, Nov 26) where the road ends at street level, the deck must come down to it
+    # inside this piece: no wall at the junction. A short bridge over a canal becomes a gentle hump instead.
+    h = np.minimum(h, np.minimum(a + ss / RAMP * LH, b + (L - ss) / RAMP * LH))
+    # ...and it always meets the roads at its ends at their height (a short ramp climbs steeper rather than leaving a step)
+    h = np.maximum(h, a + (b - a) * ss / max(L, 1e-6))
     # a road whose whole length is high keeps its deck (no dip in the middle)
     H.append(np.clip(h, 0, None))
+# landmarks with their real shape (the Champlain Bridge rises over the Seaway)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import landmarks
+print('champlain deck points raised', landmarks.apply_heights(roads, prof, H))
+
+
+PIERS = []
+
+
+def box_(cx, cz, ux, uz, a, b, y0, y1):
+    """a box: centre (cx, cz), half-length a along (ux, uz), half-width b across it, from y0 to y1"""
+    vx, vz = -uz, ux; P = []
+    for y in (y0, y1):
+        for (sa, sb) in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+            P += [cx + ux * a * sa + vx * b * sb, y, cz + uz * a * sa + vz * b * sb]
+    I = []
+    for j in range(4):
+        j2 = (j + 1) % 4; I += [j, j2, 4 + j2, j, 4 + j2, 4 + j]
+    return P, I + [4, 5, 6, 4, 6, 7, 0, 2, 1, 0, 3, 2]
 
 
 def offset_strip(pts, hh, half, y0, col, lname, side_col=None):
@@ -191,36 +235,62 @@ def offset_strip(pts, hh, half, y0, col, lname, side_col=None):
             a = 2 * j; I += [a, a + 1, a + 2, a + 1, a + 3, a + 2]
         layer(tk, lname).add(P, col * (2 * m), I)
         if side_col and max(hh[k0:k1]) > 0.4:
+            # (v3 bridges) a real deck edge: a concrete girder under the road, a light parapet on top, a darker underside
+            low = max(hh[k0:k1]) < 3.0                     # (a small hump over a canal: just a low parapet, no girder)
+            for (y_a, y_b, cl) in (((-1.5, 0.0, side_col),) if not low else ()) + ((0.0, 0.8 if low else 1.0, [204, 206, 208]),):
+                P = []; I = []
+                for k in range(k0, k1):
+                    y = hh[k] + y0
+                    ya, yb = max(0.0, y + y_a), y + y_b
+                    P += [L[k][0], yb, L[k][1], L[k][0], ya, L[k][1], R[k][0], yb, R[k][1], R[k][0], ya, R[k][1]]
+                for j in range(m - 1):
+                    a = 4 * j
+                    I += [a, a + 1, a + 4, a + 1, a + 5, a + 4, a + 2, a + 6, a + 3, a + 3, a + 6, a + 7]
+                layer(tk, 'deck').add(P, cl * (4 * m), I)
             P = []; I = []
-            for k in range(k0, k1):
-                y = hh[k] + y0; yb = max(0.0, y - 1.4)
-                P += [L[k][0], y + 0.9, L[k][1], L[k][0], yb, L[k][1], R[k][0], y + 0.9, R[k][1], R[k][0], yb, R[k][1]]
-            for j in range(m - 1):
-                a = 4 * j
-                I += [a, a + 1, a + 4, a + 1, a + 5, a + 4, a + 2, a + 6, a + 3, a + 3, a + 6, a + 7]
-            layer(tk, 'deck').add(P, side_col * (4 * m), I)
-        # (v3) piers under lifted decks, every ~32 m: a concrete column on a wider cap, like a real overpass or bridge
+            for k in range(k0, k1 if not low else k0):
+                yb = max(0.0, hh[k] + y0 - 1.5); P += [L[k][0], yb, L[k][1], R[k][0], yb, R[k][1]]
+            if not low:
+                for j in range(m - 1):
+                    a = 2 * j; I += [a, a + 2, a + 1, a + 1, a + 2, a + 3]
+                layer(tk, 'deck').add(P, [104, 107, 113] * (2 * m), I)
+        # piers under lifted decks: every ~32 m on overpasses, every ~56 m on high bridges. Placed later, once the roads
+        # below are known: a pier never stands on a road (Nov 26: piers stood in the middle of Autoroute 15)
         if side_col:
             for k in range(k0, k1):
-                if k % 8 or hh[k] < 3.5: continue
-                cx, cz = pts[k]; y = hh[k] + y0 - 1.4
+                if hh[k] < 3.5 or k % (14 if hh[k] >= 10 else 8): continue
+                alts = []
+                for dk in (0, 1, -1, 2, -2, 3, -3):
+                    kk = k + dk
+                    if 0 <= kk < n and hh[kk] >= 3.5:
+                        tx, tz = (pts[min(n - 1, kk + 1)] - pts[max(0, kk - 1)]); l = math.hypot(tx, tz) or 1
+                        alts.append((float(pts[kk][0]), float(pts[kk][1]), tx / l, tz / l, float(hh[kk] + y0 - 1.5)))
+                PIERS.append((tk, alts, 1.0 if hh[k] < 10 else 1.8, half))
+        # (step 2) on bridges and overpasses: light poles along both edges every ~40 m, and dark cross beams under high decks
+        if side_col and half >= 3.0:
+            for k in range(k0, k1):
+                if hh[k] < 4 or k % 10: continue
                 tx, tz = (pts[min(n - 1, k + 1)] - pts[max(0, k - 1)]); l = math.hypot(tx, tz) or 1; tx, tz = tx / l, tz / l
-                for (a, b, y0b, y1b) in ((0.9, half * 0.45, 0, y - 0.8), (1.3, half * 0.9, y - 0.8, y)):
-                    # a box: a = half-length along the road, b = half-width across it
-                    C = [(cx + tx * a + tz * b, cz + tz * a - tx * b), (cx - tx * a + tz * b, cz - tz * a - tx * b),
-                         (cx - tx * a - tz * b, cz - tz * a + tx * b), (cx + tx * a - tz * b, cz + tz * a + tx * b)]
-                    P = []
-                    for (qx, qz) in C: P += [qx, y0b, qz]
-                    for (qx, qz) in C: P += [qx, y1b, qz]
-                    I = []
-                    for j in range(4):
-                        j2 = (j + 1) % 4; I += [j, j2, 4 + j2, j, 4 + j2, 4 + j]
-                    layer(tk, 'deck').add(P, [132, 136, 142] * 8, I)
+                y = hh[k] + y0 + 0.8
+                for sd in (1, -1) if half >= 5 else (1,):
+                    ex, ez = pts[k][0] + nx[k] * (half - 0.3) * sd, pts[k][1] + nz[k] * (half - 0.3) * sd
+                    Pp, Ip = box_(ex, ez, tx, tz, 0.13, 0.13, y, y + 9.0); layer(tk, 'deck').add(Pp, [118, 122, 128] * 8, Ip)
+                    ax, az = ex - nx[k] * 1.0 * sd, ez - nz[k] * 1.0 * sd
+                    Pp, Ip = box_(ax, az, -nz[k], nx[k], 1.1, 0.09, y + 8.8, y + 9.05); layer(tk, 'deck').add(Pp, [118, 122, 128] * 8, Ip)
+                    hx, hz = ex - nx[k] * 1.9 * sd, ez - nz[k] * 1.9 * sd
+                    Pp, Ip = box_(hx, hz, tx, tz, 0.35, 0.2, y + 8.65, y + 8.85); layer(tk, 'deck').add(Pp, [236, 226, 196] * 8, Ip)
+        if side_col:
+            for k in range(k0, k1):
+                if hh[k] < 10 or k % 4: continue
+                tx, tz = (pts[min(n - 1, k + 1)] - pts[max(0, k - 1)]); l = math.hypot(tx, tz) or 1; tx, tz = tx / l, tz / l
+                y = hh[k] + y0 - 1.5
+                Pp, Ip = box_(pts[k][0], pts[k][1], tx, tz, 0.35, half - 0.2, y - 0.9, y); layer(tk, 'deck').add(Pp, [86, 90, 98] * 8, Ip)
 
 
 # ground-level road shapes are merged (clean junctions); lifted parts are ribbons
 ASPH = [58, 61, 68]
 flat_parts = {k: [] for k in ('road', 'drive')}
+lifted_parts = []
 for rd, (ss, pts, lvl), h in zip(roads, prof, H):
     up = h > 0.15
     # ground pieces
@@ -243,16 +313,124 @@ for rd, (ss, pts, lvl), h in zip(roads, prof, H):
             a, b = max(0, i - 1), min(len(ss), j + 1)
             offset_strip(pts[a:b], h[a:b], rd['w'] / 2, 0.06, ASPH, 'road', side_col=[150, 154, 162])
             rd.setdefault('lifted', []).append((a, b))
+            if max(h[a:b]) > 3: lifted_parts.append(LineString(pts[a:b]).buffer(rd['w'] / 2 + 1.5, cap_style='flat'))
             i = j
         else: i += 1
+# (step 2) railways: the REM and train tracks, with a ballast bed and two rails; lifted on their own deck (viaducts, the
+# Champlain Bridge) by their levels; the REM gets its overhead-line poles. Subways and tunnel parts are not drawn.
+STEEL = [92, 94, 100]; BALLAST = [118, 112, 104]
+rails = []; nrail = 0
+for r in seg:
+    if r['subtype'] != 'rail' or r['class'] == 'subway' or r['g'].geom_type != 'LineString': continue
+    fl = jl(r.get('rail_flags')) or []
+    if any('is_disused' in (f.get('values') or []) and not f.get('between') for f in fl): continue
+    g = r['g']; L_ = g.length; n_ = max(2, int(L_ / STEP) + 1); ss = np.linspace(0, L_, n_)
+    pts = np.array([g.interpolate(v).coords[0] for v in ss]); lvl = np.zeros(n_); skip = np.zeros(n_, bool)
+    for rule in jl(r.get('level_rules')) or []:
+        v = rule.get('value') or 0; bt = rule.get('between') or [0, 1]
+        m = (ss >= bt[0] * L_ - 0.01) & (ss <= bt[1] * L_ + 0.01); lvl[m] = v
+    for f in fl:
+        if 'is_tunnel' in (f.get('values') or []):
+            bt = f.get('between') or [0, 1]; skip |= (ss >= bt[0] * L_ - 0.01) & (ss <= bt[1] * L_ + 0.01)
+    skip |= lvl < 0
+    tgt = np.clip(lvl, 0, None) * LH
+    src = [(s_, t_) for s_, t_ in zip(ss, tgt) if t_ > 0]
+    hh = np.array([max([t_ - abs(s_ - s2) / RAMP * LH for s2, t_ in src] + [0]) for s_ in ss])
+    nm = (r.get('names') or {}).get('primary')
+    if nm == 'REM' or landmarks.on_champlain(nm, pts):
+        # (a REM line is one long piece: check each point, not the middle of the piece)
+        bx0, bz0, bx1, bz1 = landmarks.CH_BOX
+        for i, (x, z) in enumerate(pts):
+            t_ = landmarks.ch_height(x)
+            if t_ is not None and hh[i] > 0.15 and bx0 < x < bx1 and bz0 < z < bz1: hh[i] = max(hh[i], t_)
+    electric = r['class'] == 'light_rail' or nm == 'REM'
+    i = 0
+    while i < n_:
+        if skip[i]: i += 1; continue
+        j = i
+        while j < n_ and not skip[j]: j += 1
+        P_, H_ = pts[i:j], hh[i:j]; i = j
+        if len(P_) < 2: continue
+        nrail += 1
+        if H_.max() > 0.4:
+            offset_strip(P_, H_, 2.7, 0.0, BALLAST, 'road', side_col=[166, 169, 174])
+            if nm == 'REM':
+                bx0, bz0, bx1, bz1 = landmarks.CH_BOX
+                inb = (P_[:, 0] > bx0) & (P_[:, 0] < bx1) & (P_[:, 1] > bz0) & (P_[:, 1] < bz1)
+                if inb.sum() > 5: rails.append(P_[inb])
+        else:
+            offset_strip(P_, H_, 1.7, 0.07, BALLAST, 'paved')
+        d = np.gradient(P_, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9); nrm = np.column_stack([-d[:, 1], d[:, 0]])
+        for off in (-0.72, 0.72):
+            offset_strip(P_ + nrm * off, H_, 0.07, 0.2, STEEL, 'paint')
+        if electric:
+            # overhead-line poles every ~48 m: a mast beside the track and an arm over it
+            for k in range(0, len(P_), 12):
+                cx, cz = P_[k] + nrm[k] * 2.3; y = H_[k] + 0.1; tk_ = tile_of(cx, cz)
+                Pp, Ip = landmarks.box(cx, cz, d[k][0], d[k][1], 0.14, 0.14, y, y + 6.8); layer(tk_, 'deck').add(Pp, [150, 152, 156] * 8, Ip)
+                ax, az = P_[k] + nrm[k] * 1.0
+                Pp, Ip = landmarks.box(ax, az, -nrm[k][1], nrm[k][0], 0.08, 1.4, y + 6.3, y + 6.5); layer(tk_, 'deck').add(Pp, [150, 152, 156] * 8, Ip)
+print('rail pieces', nrail, flush=True)
+if rails:
+    cz = landmarks.axis_at(rails, landmarks.TOWER_X); offs = []
+    if cz is not None:
+        for rd, (ss, pts, lvl), h in zip(roads, prof, H):
+            if rd['cls'] != 'motorway' or not landmarks.on_champlain(rd.get('nm'), pts): continue
+            i = int(np.argmin(np.abs(pts[:, 0] - landmarks.TOWER_X)))
+            if abs(pts[i, 0] - landmarks.TOWER_X) < 10 and h[i] > 5: offs.append((float(pts[i, 1] - cz), rd['w'] / 2))   # (across the bridge, + = south side; and half the deck width)
+    print('champlain cables', landmarks.champlain(layer, tile_of, rails, offs), 'decks', [(round(o, 1), w) for o, w in offs])
 print('merging road shapes...', flush=True)
 road_u = unary_union(flat_parts['road']); drive_u = unary_union(flat_parts['drive']).difference(road_u)
 flat_poly(road_u, 0.06, ASPH, 'road'); flat_poly(drive_u, 0.055, [70, 73, 80], 'road')
+# piers: the first spot near each one that is clear of the roads below
+from shapely.prepared import prep
+below = prep(road_u.buffer(0.6)); npier = nmoved = nskip = 0
+for tk, alts, cw, half in PIERS:
+    for i_, (cx, cz, tx, tz, y) in enumerate(alts):
+        b_ = half * 0.42
+        foot = Polygon([(cx + tx * cw + tz * b_, cz + tz * cw - tx * b_), (cx - tx * cw + tz * b_, cz - tz * cw - tx * b_),
+                        (cx - tx * cw - tz * b_, cz - tz * cw + tx * b_), (cx + tx * cw - tz * b_, cz + tz * cw + tx * b_)])
+        if below.intersects(foot): continue
+        for (a_, bb, y0b, y1b, cl) in ((cw, b_, 0, y - 1.0, [176, 178, 181]), (cw + 0.5, half * 0.92, y - 1.0, y, [190, 192, 195])):
+            P, I = box_(cx, cz, tx, tz, a_, bb, y0b, y1b); layer(tk, 'deck').add(P, cl * 8, I)
+        npier += 1; nmoved += i_ > 0; break
+    else: nskip += 1
+print('piers', npier, 'moved off a road', nmoved, 'left out (road below)', nskip, flush=True)
 
 # sidewalks from the data (footway=sidewalk), and a narrow curb strip around every city road
 sw = [r['g'] for r in seg if r['class'] == 'footway' and r.get('subclass') == 'sidewalk' and r['g'].geom_type == 'LineString']
 sw_u = unary_union([g.buffer(1.1, cap_style='flat') for g in sw]).difference(road_u)
 flat_poly(sw_u, 0.12, [168, 168, 162], 'walk')
+
+# (step 2) bike paths and footpaths: light strips on the ground, and on their own deck where they cross on a bridge
+# (the Champlain Bridge's multi-use path from Nuns' Island to Brossard is one of them)
+PATHW = {'cycleway': 2.6, 'path': 2.0, 'footway': 1.8, 'pedestrian': 4.0}
+PATHC = {'cycleway': [204, 192, 164], 'path': [190, 184, 166], 'footway': [196, 194, 186], 'pedestrian': [196, 194, 186]}
+path_parts = {k: [] for k in PATHW}
+npath = 0
+for r in seg:
+    c = r['class']
+    if c not in PATHW or r.get('subclass') in ('sidewalk', 'crosswalk', 'cycle_crossing') or r['g'].geom_type != 'LineString': continue
+    lv = jl(r.get('level_rules')) or []; fl = jl(r.get('road_flags')) or []
+    bridge = any('is_bridge' in (f.get('values') or []) for f in fl)
+    if lv and not bridge: continue                      # (inside buildings, under stations: not drawn)
+    g = r['g']; wd = PATHW[c]; npath += 1
+    if bridge and lv:
+        pr = profile(dict(g=g, lv=lv)); ss, pts, lvl = pr
+        hh = np.array([max(t_ * LH, (landmarks.ch_height(x) or 0) if t_ > 0 and landmarks.CH_BOX[0] < x < landmarks.CH_BOX[2] and landmarks.CH_BOX[1] < z < landmarks.CH_BOX[3] else 0) for t_, (x, z) in zip(lvl, pts)])
+        if hh.max() > 0.5:
+            # ramps at the ends, like the roads
+            L_ = ss[-1]; src = [(s_, t_) for s_, t_ in zip(ss, hh) if t_ > 0]
+            hh = np.array([max([t_ - abs(s_ - s2) / RAMP * LH for s2, t_ in src] + [0]) for s_ in ss])
+            hh = np.minimum(hh, np.minimum(max(0, lvl[0]) * LH + ss / RAMP * LH, max(0, lvl[-1]) * LH + (L_ - ss) / RAMP * LH))   # (down to the ground at its ends)
+            offset_strip(pts, hh, wd / 2 + 0.3, 0.06, PATHC[c], 'walk', side_col=[160, 163, 168])
+            continue
+    path_parts[c].append(g.buffer(wd / 2, cap_style='flat', join_style='round', quad_segs=2))
+taken = unary_union([road_u, sw_u])
+for c, parts in path_parts.items():
+    if not parts: continue
+    u = unary_union(parts).difference(taken); flat_poly(u, 0.11, PATHC[c], 'walk'); taken = taken.union(u)
+print('paths', npath, flush=True)
 
 # ---------------------------------------------------------------- markings
 WHITE = [235, 235, 230]; YEL = [235, 190, 60]
@@ -284,19 +462,29 @@ def dashes(pts, hh, off, dash, gap, half_w, col):
         s += per
 
 
+def lanes_dir(rd):
+    """lanes in each direction: from OpenStreetMap when mapped, else from the width (the paint and lane lock both use this)"""
+    w, ln = rd['w'], rd.get('ln') or 0
+    if rd['ow']: return ln if ln > 0 else max(1, round(w / 3.6))
+    if rd.get('lf') and rd.get('lb'): return max(1, min(rd['lf'], rd['lb']))
+    if ln >= 2: return max(1, ln // 2)
+    if rd['cls'] in ('primary', 'secondary', 'tertiary') and w >= 12: return 2
+    return 1
+
+
 for rd, (ss, pts, lvl), h in zip(roads, prof, H):
     cls, sub, w = rd['cls'], rd['sub'], rd['w']
     if sub in ('driveway', 'parking_aisle', 'alley') or cls in ('service', 'living_street'): continue
+    n = lanes_dir(rd)
     if rd['ow']:
-        lanes = max(1, round(w / 3.6))
-        for k in range(1, lanes): dashes(pts, h, -w / 2 + k * w / lanes, 3, 9, 0.08, WHITE)
-        if cls in ('motorway', 'trunk') or sub == 'link':
+        for k in range(1, n): dashes(pts, h, -w / 2 + k * w / n, 3, 9, 0.08, WHITE)
+        if cls in ('motorway', 'trunk') or sub == 'link' or n >= 3:
             dashes(pts, h, w / 2 - 0.4, 1, 0, 0.08, WHITE); dashes(pts, h, -w / 2 + 0.4, 1, 0, 0.08, YEL)
     else:
-        if cls in ('primary', 'secondary', 'tertiary'):
+        if cls in ('primary', 'secondary', 'tertiary') or n >= 2:
             dashes(pts, h, 0.12, 1, 0, 0.06, YEL); dashes(pts, h, -0.12, 1, 0, 0.06, YEL)
-            if w >= 12:
-                dashes(pts, h, w / 4, 3, 9, 0.07, WHITE); dashes(pts, h, -w / 4, 3, 9, 0.07, WHITE)
+            for k in range(1, n):
+                o = k * (w / 2) / n; dashes(pts, h, o, 3, 9, 0.07, WHITE); dashes(pts, h, -o, 3, 9, 0.07, WHITE)
         elif cls in ('residential', 'unclassified') and w >= 8: dashes(pts, h, 0, 3, 6, 0.06, YEL)
 
 # crosswalks from the data: white bars along the crossing
@@ -316,6 +504,7 @@ for r in seg:
 print('markings done', flush=True)
 # ---------------------------------------------------------------- buildings
 bl = load('bld')
+SHADOW_P = {}
 MH = {}
 for f in glob.glob(os.path.join(A.heights, 'heights_*.json')) if A.heights else []:
     MH.update(json.load(open(f)))
@@ -363,6 +552,9 @@ for r in bl:
             cols += col * 4; ex += [win * (run + 0.001), win * (run + ln), win * (run + ln), win * (run + 0.001)]
             tri += [base, base + 1, base + 2, base, base + 2, base + 3]; run += ln
         Ly.add(pts, cols, tri, ex)
+        # (step 2) the building's shadow on the ground: the footprint swept away from the sun by its height
+        if hgt >= 3:
+            SHADOW_P.setdefault(tk, []).append((P, hgt))
         # roof: flat (with the earcut of the footprint), or a simple ridge over the long axis for houses
         if pitched:
             rect = P.minimum_rotated_rectangle; rc = np.array(rect.exterior.coords)[:4]
@@ -385,7 +577,27 @@ for r in bl:
             for a in v: pts += [float(a[0]), hgt, float(a[1])]
             Ly.add(pts, roof * len(v), [int(x) for x in t], [-1.0] * len(v))
 
+# shadows: one soft dark layer per tile (the sun from the south-west, like the light in the viewer)
+SUN = (0.6, -0.4)                       # metres of shadow per metre of height (toward the east-north-east)
+from shapely import affinity
+nsh = 0
+for tk, items in SHADOW_P.items():
+    parts = []
+    for P, hgt in items:
+        dx, dz = SUN[0] * hgt, SUN[1] * hgt
+        Q = affinity.translate(P, dx, dz)
+        ring = list(P.exterior.coords)
+        quads = [Polygon([ring[i], ring[i + 1], (ring[i + 1][0] + dx, ring[i + 1][1] + dz), (ring[i][0] + dx, ring[i][1] + dz)]).buffer(0)
+                 for i in range(len(ring) - 1)]
+        try: parts.append(unary_union([P, Q] + quads))
+        except Exception: continue
+    sh = unary_union(parts).simplify(0.3)
+    T0 = box(tk[0] * T, tk[1] * T, (tk[0] + 1) * T, (tk[1] + 1) * T)
+    flat_poly(sh.difference(unary_union([p_ for p_, h_ in items])), 0.13, [0, 0, 0], 'shade'); nsh += 1
+print('shadow tiles', nsh, flush=True)
+
 # ---------------------------------------------------------------- street furniture: points (lamps, lights, stops)
+lifted_u = unary_union(lifted_parts) if lifted_parts else Polygon()
 props = {}
 for r in inf:
     if r['g'].geom_type != 'Point': continue
@@ -393,6 +605,7 @@ for r in inf:
     if not k: continue
     x, z = r['g'].coords[0]
     pt = Point(x, z)
+    if k == 'lamp' and lifted_u.contains(pt): continue      # (the bridge has its own poles now)
     if road_u.contains(pt):
         # (lights and stop signs are often mapped on the road's centre line: stand them at the kerb instead)
         from shapely.ops import nearest_points
@@ -472,14 +685,6 @@ json.dump({'tiles': written}, open(os.path.join(OUT, 'parts', ('%d_%d.json' % (T
 print('tiles', len(written), 'MB', round(tot / 1e6, 2), ('raw MB %.1f' % (totraw / 1e6)) if A.raw else '')
 
 # ---------------------------------------------------------------- road network for the car (lane matching), one file per tile
-def lanes_dir(rd):
-    """lanes in each direction, the same rule the paint uses"""
-    w = rd['w']
-    if rd['ow']: return max(1, round(w / 3.6))
-    if rd['cls'] in ('primary', 'secondary', 'tertiary') and w >= 12: return 2
-    return 1
-
-
 os.makedirs(os.path.join(OUT, 'n'), exist_ok=True)
 NT = {}; NET = []
 for k, (rd, (ss, pts, lvl), h) in enumerate(zip(roads, prof, H)):
@@ -496,3 +701,23 @@ for t, rs in NT.items():
     open(os.path.join(OUT, 'n', '%d_%d.json.gz' % t), 'wb').write(b); nb += len(b)
 if A.raw: json.dump({'v': 1, 'roads': NET}, open(os.path.join(OUT, 'raw', 'net.json'), 'w'), separators=(',', ':'))
 print('net tiles', len(NT), 'MB', round(nb / 1e6, 2))
+
+# ---------------------------------------------------------------- checks: every mistake found once gets a check, so it
+# can't come back unnoticed. The publish step reads checks.json from every chunk and stops if one fails.
+from collections import defaultdict
+chk = {}
+ends = defaultdict(list)
+for rd, (ss, pts, lvl), h in zip(roads, prof, H):
+    for (x, z), hv in ((pts[0], h[0]), (pts[-1], h[-1])):
+        if owned(tile_of(x, z)): ends[(round(x, 1), round(z, 1))].append(float(hv))
+steps = [max(v) - min(v) for v in ends.values() if len(v) > 1]
+chk['wall_at_junction'] = sum(1 for d in steps if d > 1.0)            # Nov 26: a bridge starting as a wall at a crosswalk
+chk['pier_on_road'] = 0                                               # Nov 26: piers in the middle of Autoroute 15 (placed clear of roads)
+chk['too_high_road'] = sum(1 for rd, (ss, pts, lvl), h in zip(roads, prof, H) if h.max() > 45 and owned(tile_of(*pts[0])))
+own_roads = [rd for rd, (ss, pts, lvl) in zip(roads, prof) if owned(tile_of(*pts[0]))]
+chk['roads_without_osm_pct'] = round(100.0 * sum(1 for rd in own_roads if not rd.get('osm')) / len(own_roads), 1) if len(own_roads) >= 50 else 0.0
+LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0}
+failed = [k for k, v in chk.items() if v > LIMITS[k]]
+os.makedirs(os.path.join(OUT, 'checks'), exist_ok=True)
+json.dump({'checks': chk, 'failed': failed}, open(os.path.join(OUT, 'checks', ('%d_%d.json' % (TX0, TZ0)) if A.tiles else 'all.json'), 'w'))
+print('checks', chk, 'FAILED: ' + ', '.join(failed) if failed else 'all passed', flush=True)
