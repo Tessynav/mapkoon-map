@@ -6,4 +6,4 @@ fsspec
 aiohttp
 rasterio
 pyproj
-
+osmium
