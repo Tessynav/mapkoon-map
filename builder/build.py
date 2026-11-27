@@ -541,6 +541,7 @@ for i, (rd, (ss, pts, lvl)) in enumerate(zip(roads, prof)):
 SURF_T = STRtree(SURF)
 PLINE = [LineString(p) if len(p) >= 2 else None for (_, p, _) in prof]
 PAINT = []   # (road, painted solid line, height): for the check below
+PAINTED = set()   # roads with any line painted on them (for the audit below)
 GORE_PAIR = set(); CUT = {}   # filled in at the merges, below
 ENDS = [((round(p[0][0], 1), round(p[0][1], 1)), (round(p[-1][0], 1), round(p[-1][1], 1))) for (_, p, _) in prof]
 
@@ -640,6 +641,7 @@ def dashes(pts, hh, off, dash, gap, half_w, col, ri=None, edge=False):
         if len(run) >= 2:
             P = np.column_stack([np.interp(run, seg_len, c[:, 0]), np.interp(run, seg_len, c[:, 1])])
             Y = np.interp(run, seg_len, hh); offset_strip(P, Y, half_w, 0.09, col, 'paint')
+            if ri is not None: PAINTED.add(ri)
             if gap <= 0 and ri is not None: PAINT.append((ri, LineString(P), Y.copy()))
         run.clear()
     while s < Ltot - 0.3:
@@ -812,12 +814,24 @@ XN_T = STRtree([p for p, _, _ in XN]) if XN else None
 
 
 def zebra(g, y=0.0, hw=1.6):
-    """bars along the traffic every 2 m, across the crossing line g (only on the asphalt)"""
-    for k in range(0, int(g.length), 2):
-        p = np.array(g.interpolate(k + 0.5).coords[0]); q = np.array(g.interpolate(min(g.length, k + 0.6)).coords[0])
-        d = q - p; d /= (np.linalg.norm(d) + 1e-9); nrm = np.array([-d[1], d[0]])
-        if not road_u.contains(Point(p)): continue
-        offset_strip(np.array([p - nrm * hw, p + nrm * hw]), np.array([y, y]), 0.25, 0.1, WHITE, 'paint')
+    """bars along the traffic, evenly spread across the crossing line g (only on the asphalt).
+    (Nov 27 12:54 drive, Nuns' Island: "some crosswalks have only one zebra line") bars were every 2 m from one end, so a
+    narrow street got 1 or 2 bars, off to one side. Now the bars are spread evenly over the asphalt part: about every
+    1.2 m, at least 3 (narrower bars on a narrow street), like real paint"""
+    on = g.intersection(road_u)
+    for part in (on.geoms if hasattr(on, 'geoms') else [on]):
+        if part.geom_type != 'LineString' or part.length < 1.5: continue
+        L = part.length; n = max(3, int(round(L / 1.2))); step = L / n; bw = min(0.25, step * 0.22)
+        for k in range(n):
+            s0 = (k + 0.5) * step
+            p = np.array(part.interpolate(s0).coords[0]); q = np.array(part.interpolate(min(L, s0 + 0.1)).coords[0])
+            if np.linalg.norm(q - p) < 1e-6: q = p; p = np.array(part.interpolate(max(0, s0 - 0.1)).coords[0])
+            d = q - p; d /= (np.linalg.norm(d) + 1e-9); nrm = np.array([-d[1], d[0]]); c = np.array(part.interpolate(s0).coords[0])
+            offset_strip(np.array([c - nrm * hw, c + nrm * hw]), np.array([y, y]), bw, 0.1, WHITE, 'paint')
+        ZB.append(n)
+
+
+ZB = []; NDUP = [0]
 
 
 def side_lines(g, y=0.0, off=1.7, dashed=False):
@@ -837,7 +851,13 @@ def side_lines(g, y=0.0, off=1.7, dashed=False):
             if not on: run = []
 
 
+DRAWN = []
+
+
 def draw_cross(g, st, y=0.0):
+    # (Nov 27: the same crosswalk is sometimes mapped twice, a footway and a second line on top: drawn once)
+    if any(g.hausdorff_distance(d) < 1.5 for d in DRAWN if d.distance(g) < 1.5): NDUP[0] += 1; return
+    DRAWN.append(g)
     if st in ('zebra', 'ladder'): zebra(g, y)
     if st in ('lines', 'ladder', 'dashes'): side_lines(g, y, dashed=st == 'dashes')
 
@@ -873,7 +893,7 @@ for k, (p, st, _) in enumerate(XN):
     u = pts[i + 1] - pts[i]; u = u / (np.linalg.norm(u) + 1e-9); nrm = np.array([-u[1], u[0]])
     hw = float(np.interp(s, ss, WJ[best])) / 2 + 0.5; c = np.array(p.coords[0])
     draw_cross(LineString([c - nrm * hw, c + nrm * hw]), st, float(np.interp(s, ss, H[best]))); ncw[st + ' (point only)'] += 1
-print('crosswalks', dict(ncw), flush=True)
+print('crosswalks', dict(ncw), 'zebra bars: fewest', min(ZB) if ZB else 0, 'doubles skipped', NDUP[0], 'average', round(sum(ZB) / max(1, len(ZB)), 1), flush=True)
 
 print('markings done', flush=True)
 # ---------------------------------------------------------------- buildings
@@ -890,7 +910,7 @@ PAL = {'house': ['#a8553f', '#b9a58a', '#d8d2c4', '#8f4a3a', '#c9b79a'], 'reside
        'outbuilding': ['#8d8f93', '#a3a29c']}
 DEFH = {'house': 7.5, 'detached': 7.5, 'residential': 8.5, 'apartments': 13, 'commercial': 7, 'retail': 6, 'industrial': 8,
         'outbuilding': 3.2, 'garage': 3, 'shed': 2.6, 'school': 10, 'church': 14}
-NFL = [0]
+NFL = [0]; BAUD = {'buildings': 0, 'no_height_data': 0, 'below_floors': 0}
 for r in bl:
     g = r['g']
     if g.geom_type not in ('Polygon', 'MultiPolygon') or r.get('is_underground'): continue
@@ -909,6 +929,11 @@ for r in bl:
         if hgt and ((hc and hf >= 25 and hf > 1.6 * hgt) or (not hc and hf >= 12 and hf > 1.35 * hgt)): hgt = hf; NFL[0] += 1
     area = g.area
     if not hgt: hgt = DEFH.get(cls, 6.5 if area < 150 else 9 if area < 900 else 12)
+    if owned(tile_of(g.centroid.x, g.centroid.y)):
+        BAUD['buildings'] += 1
+        if not (hc or ho or r.get('num_floors')): BAUD['no_height_data'] += 1
+        hf_ = fl * 3.1 + 1.2
+        if 1 <= fl <= 90 and ((hc and hf_ >= 25 and hf_ > 1.6 * hgt) or (not hc and hf_ >= 12 and hf_ > 1.35 * hgt)): BAUD['below_floors'] += 1
     if area < 40: hgt = min(hgt, 3.5)
     mh = r.get('min_height') or 0
     hid = int(hashlib.md5(r['id'].encode()).hexdigest()[:8], 16)
@@ -1141,7 +1166,27 @@ if PAINT:
             if abs(hy(ga, ya) - hy(gb, yb)) > 1.5: continue                  # one passes over the other
             if owned(tile_of(x.x, x.y)): crossed += 1
 chk['lines_crossing'] = crossed
-LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0, 'lines_crossing': 0}
+# ---- (Nov 27: "check the whole map, not just the spot I send") the audit: every kind of mistake found on a drive gets
+# counted here for every tile, on every build, so it is caught everywhere at once (and can't come back)
+def mine(i): return owned(tile_of(*prof[i][1][len(prof[i][1]) // 2]))
+def normal(rd): return rd['sub'] not in ('driveway', 'parking_aisle', 'alley', 'link') and rd['cls'] not in ('service', 'living_street', 'unknown')
+# a two-way street wide enough for two cars with no centre line at all (Nov 27 step 1)
+chk['street_no_centre_line'] = sum(1 for i, rd in enumerate(roads) if mine(i) and normal(rd) and not rd['ow'] and rd['w'] >= 6
+                                   and rd.get('lm', 1) and prof[i][0][-1] > 60 and i not in PAINTED)
+# one half of a divided road painted and the other blank (Nov 27, Nuns' Island)
+chk['divided_half_unpainted'] = sum(1 for i in DIV if mine(i) and prof[i][0][-1] > 60 and i not in PAINTED)
+# a one-way road with 2+ lanes and no lane lines
+chk['lanes_no_lines'] = sum(1 for i, rd in enumerate(roads) if mine(i) and normal(rd) and rd['ow'] and lanes_dir(rd) >= 2
+                            and prof[i][0][-1] > 60 and i not in PAINTED)
+# a zebra crosswalk with fewer than 3 bars (Nov 27 12:54 drive)
+chk['zebra_few_bars'] = sum(1 for n in ZB if n < 3)
+# a building much lower than its mapped number of floors (Nov 27, Pointe-Nord)
+chk['building_below_floors'] = BAUD['below_floors']
+# for information (not a failure): buildings with no height in any source get a typical height for their type
+chk['buildings_typical_height_pct'] = round(100.0 * BAUD['no_height_data'] / max(1, BAUD['buildings']), 1)
+LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0, 'lines_crossing': 0,
+          'street_no_centre_line': 0, 'divided_half_unpainted': 0, 'lanes_no_lines': 0, 'zebra_few_bars': 0,
+          'building_below_floors': 0, 'buildings_typical_height_pct': 100}
 failed = [k for k, v in chk.items() if v > LIMITS[k]]
 os.makedirs(os.path.join(OUT, 'checks'), exist_ok=True)
 json.dump({'checks': chk, 'failed': failed}, open(os.path.join(OUT, 'checks', ('%d_%d.json' % (TX0, TZ0)) if A.tiles else 'all.json'), 'w'))
