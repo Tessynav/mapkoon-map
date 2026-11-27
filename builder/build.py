@@ -166,11 +166,12 @@ for r in seg:
     ow = any(a.get('access_type') == 'denied' and (a.get('when') or {}).get('heading') == 'backward' and not (a.get('when') or {}).get('mode') for a in acc)
     lv = jl(r.get('level_rules')) or []; fl = jl(r.get('road_flags')) or []
     o = osm_way(r); ln = lf = lb = 0
+    if o and 'ln' not in o: o = None                   # (a crosswalk record, not a road)
     if o:
         nosm += 1; ln = o.get('ln') or 0; lf = o.get('lf') or 0; lb = o.get('lb') or 0
         if 2 < (o.get('wd') or 0) < 40: w = o['wd']
     roads.append(dict(g=r['g'], cls=r['class'], sub=sub, w=w, ow=ow, lv=lv, fl=fl, id=r['id'], nm=(r.get('names') or {}).get('primary'),
-                      ln=ln, lf=lf, lb=lb, osm=bool(o), osmsrc=osm_id(r) is not None))
+                      ln=ln, lf=lf, lb=lb, osm=bool(o), osmsrc=osm_id(r) is not None, lm=(o or {}).get('lm', 1)))
 print('roads', len(roads), 'with OpenStreetMap lanes/width', nosm)
 
 STEP = 4.0; RAMP = 90.0; LH = 6.5   # sampling (m), ramp length (m), height per level (m)
@@ -752,21 +753,102 @@ for ri, (rd, (ss, pts, lvl), h) in enumerate(zip(roads, prof, H)):
             dashes(pts, h, 0.12, 1, 0, 0.06, YEL, ri); dashes(pts, h, -0.12, 1, 0, 0.06, YEL, ri)
             for k in range(1, n):
                 o = k * (w / 2) / n; dashes(pts, h, o, 3, 9, 0.07, WHITE, ri); dashes(pts, h, -o, 3, 9, 0.07, WHITE, ri)
-        elif cls in ('residential', 'unclassified') and rd['w'] >= 8: dashes(pts, h, 0, 3, 6, 0.06, YEL, ri)
+        # (step 1, Nov 27: "yellow centre lines on normal streets") every two-way street wide enough for two cars gets a
+        # clear yellow dashed centre line (it was 12 cm wide, only on streets of 8 m and more: hard to see), unless the
+        # street is mapped with no painted lines (lane_markings=no)
+        elif cls in ('residential', 'unclassified') and rd['w'] >= 6 and rd.get('lm', 1): dashes(pts, h, 0, 3, 3, 0.09, YEL, ri)
 
-# crosswalks from the data: white bars along the crossing
+# (step 1, Nov 27) crosswalks: only the ones really painted on the street, in their real style. The crossing type comes
+# from OpenStreetMap: the crossing point on the road (in Overture's infrastructure, with its original tags) first, else the
+# crosswalk way (osm.py). Unmarked or unknown: nothing drawn (before, every crosswalk got white bars, even the unmarked
+# ones: 721 of 1290 crossings in Verdun are tagged unmarked).
+#   zebra: wide bars along the traffic; lines: two parallel lines (the usual style at Montréal traffic lights);
+#   ladder: both; dashes: two dashed lines
+def cross_style(t):
+    if not t: return None
+    m = (t.get('crossing:markings') or t.get('xm') or '').lower(); c = (t.get('crossing') or t.get('xc') or '').lower()
+    ref = (t.get('crossing_ref') or t.get('xr') or '').lower()
+    if m in ('no', 'surface', 'pictograms', 'dots'): return None   # (coloured pavement or symbols: not drawn yet)
+    for k in ('ladder', 'zebra', 'lines', 'dashes'):
+        if m.startswith(k): return k
+    if c in ('unmarked', 'no', 'informal', 'island') and m != 'yes': return None
+    if ref == 'zebra' or c == 'zebra': return 'zebra'
+    if c == 'traffic_signals': return 'lines'
+    if m == 'yes' or c in ('marked', 'uncontrolled'): return 'zebra'
+    return None
+
+
+XN = []   # crossing points on roads: (point, style, has tags)
+for r in inf:
+    if r.get('class') != 'crossing' or r['g'].geom_type != 'Point': continue
+    t = dict(r.get('source_tags') or [])
+    XN.append((r['g'], cross_style(t), any(k in t for k in ('crossing', 'crossing:markings', 'crossing_ref'))))
+XN_T = STRtree([p for p, _, _ in XN]) if XN else None
+
+
+def zebra(g, y=0.0, hw=1.6):
+    """bars along the traffic every 2 m, across the crossing line g (only on the asphalt)"""
+    for k in range(0, int(g.length), 2):
+        p = np.array(g.interpolate(k + 0.5).coords[0]); q = np.array(g.interpolate(min(g.length, k + 0.6)).coords[0])
+        d = q - p; d /= (np.linalg.norm(d) + 1e-9); nrm = np.array([-d[1], d[0]])
+        if not road_u.contains(Point(p)): continue
+        offset_strip(np.array([p - nrm * hw, p + nrm * hw]), np.array([y, y]), 0.25, 0.1, WHITE, 'paint')
+
+
+def side_lines(g, y=0.0, off=1.7, dashed=False):
+    """two lines along the crossing, one on each side (the walkers' lane between them), only on the asphalt"""
+    n = max(2, int(g.length / 0.5) + 1)
+    P = np.array([g.interpolate(s).coords[0] for s in np.linspace(0, g.length, n)])
+    d = np.gradient(P, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9); nrm = np.column_stack([-d[:, 1], d[:, 0]])
+    for sg in (1, -1):
+        Q = P + nrm * off * sg
+        ok = np.array([road_u.contains(Point(q)) for q in Q])
+        run = []
+        for k in range(len(Q)):
+            on = ok[k] and (not dashed or int(k * g.length / (n - 1) / 0.6) % 2 == 0)
+            if on: run.append(Q[k])
+            if (not on or k == len(Q) - 1) and len(run) >= 2:
+                offset_strip(np.array(run), np.full(len(run), y), 0.1, 0.1, WHITE, 'paint')
+            if not on: run = []
+
+
+def draw_cross(g, st, y=0.0):
+    if st in ('zebra', 'ladder'): zebra(g, y)
+    if st in ('lines', 'ladder', 'dashes'): side_lines(g, y, dashed=st == 'dashes')
+
+
+ncw = Counter(); used = set()
 for r in seg:
-    if r['class'] == 'footway' and r.get('subclass') == 'crosswalk' and r['g'].geom_type == 'LineString':
-        g = r['g']
-        if g.length < 3 or not g.intersects(road_u): continue
-        n = int(g.length / 1.0)
-        for k in range(n):
-            if k % 2: continue
-            p = np.array(g.interpolate(k + 0.5).coords[0]); q = np.array(g.interpolate(min(g.length, k + 0.6)).coords[0])
-            d = q - p; d /= (np.linalg.norm(d) + 1e-9); nrm = np.array([-d[1], d[0]])
-            if not road_u.contains(Point(p)): continue
-            P = np.array([p - nrm * 1.6, p + nrm * 1.6])
-            offset_strip(P, np.array([0.0, 0.0]), 0.25, 0.1, WHITE, 'paint')
+    if not (r['class'] in ('footway', 'cycleway', 'path') and r.get('subclass') in ('crosswalk', 'cycle_crossing')) or r['g'].geom_type != 'LineString': continue
+    g = r['g']
+    if g.length < 3 or not g.intersects(road_u): continue
+    st = None; known = False
+    for k in (XN_T.query(g, predicate='dwithin', distance=1.0) if XN_T is not None else []):
+        used.add(int(k))
+        if XN[k][2]: known = True
+        if XN[k][1]: st = XN[k][1]
+    if not known:
+        o = OSMW.get(osm_id(r)) if osm_id(r) else None
+        if o and 'ln' not in o: st = cross_style(o); known = True
+    ncw[st or ('unmarked' if known else 'unknown')] += 1
+    if not st: continue
+    on = g.intersection(road_u.buffer(0.5))
+    for part in (on.geoms if hasattr(on, 'geoms') else [on]):
+        if part.geom_type == 'LineString' and part.length >= 2: draw_cross(part, st)
+# painted crossing points with no crosswalk way: drawn straight across the road they sit on
+for k, (p, st, _) in enumerate(XN):
+    if not st or k in used: continue
+    best = None
+    for j in SURF_T.query(p, predicate='dwithin', distance=1.0):
+        i = SURF_I[j]; rd = roads[i]
+        if rd['sub'] in ('driveway', 'parking_aisle') or PLINE[i] is None or PLINE[i].distance(p) > 1.0: continue
+        if best is None or rank(rd) > rank(roads[best]): best = i
+    if best is None: continue
+    ss, pts, _ = prof[best]; s = PLINE[best].project(p); i = min(len(pts) - 2, int(np.searchsorted(ss, s, side='right')) - 1)
+    u = pts[i + 1] - pts[i]; u = u / (np.linalg.norm(u) + 1e-9); nrm = np.array([-u[1], u[0]])
+    hw = float(np.interp(s, ss, WJ[best])) / 2 + 0.5; c = np.array(p.coords[0])
+    draw_cross(LineString([c - nrm * hw, c + nrm * hw]), st, float(np.interp(s, ss, H[best]))); ncw[st + ' (point only)'] += 1
+print('crosswalks', dict(ncw), flush=True)
 
 print('markings done', flush=True)
 # ---------------------------------------------------------------- buildings
