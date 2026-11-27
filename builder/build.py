@@ -740,13 +740,38 @@ for key, ids in END_AT.items():
 if GORES and JZ is not None: JZ = JZ.difference(unary_union(GORES))      # no blank patch at a merge
 print('merges with a hatched tip', ngore, flush=True)
 
+# (Nov 27: "why does the left road have markings and the right one doesn't?") a divided road (a boulevard with a
+# median) is two one-way halves side by side, and OpenStreetMap often gives one half 1 lane and the other 2: one half
+# was painted, the other was blank. Every one-way half that has the other direction running alongside it (within
+# 35 m, opposite way) is a divided road: both halves get the real edge lines (yellow on the left, white on the right)
+OW_I = [i for i, rd in enumerate(roads) if rd['ow'] and rd['sub'] not in ('driveway', 'parking_aisle', 'alley') and rd['cls'] not in ('service', 'living_street') and PLINE[i] is not None]
+OW_T = STRtree([PLINE[i] for i in OW_I]) if OW_I else None
+DIV = set()
+for n_, i in enumerate(OW_I):
+    ss, pts, _ = prof[i]
+    if ss[-1] < 20: continue
+    hits = 0; tries = 0
+    for f_ in (0.25, 0.5, 0.75):
+        s_ = ss[-1] * f_; P_ = PLINE[i].interpolate(s_); k_ = min(len(pts) - 2, int(np.searchsorted(ss, s_, side='right')) - 1)
+        t_ = pts[k_ + 1] - pts[k_]; t_ = t_ / (np.linalg.norm(t_) + 1e-9); tries += 1
+        for m_ in OW_T.query(P_.buffer(35)):
+            j = OW_I[m_]
+            if j == i or abs(float(np.interp(PLINE[j].project(P_), prof[j][0], H[j])) - float(np.interp(s_, ss, H[i]))) > 2: continue
+            d_ = PLINE[j].distance(P_)
+            if d_ < 3 or d_ > 35: continue
+            sj = PLINE[j].project(P_); pj = prof[j][1]; kj = min(len(pj) - 2, int(np.searchsorted(prof[j][0], sj, side='right')) - 1)
+            u_ = pj[kj + 1] - pj[kj]; u_ = u_ / (np.linalg.norm(u_) + 1e-9)
+            if float(np.dot(t_, u_)) < -0.85: hits += 1; break
+    if hits >= 2: DIV.add(i)
+print('divided-road halves', len(DIV), 'of', len(OW_I), 'one-way roads', flush=True)
+
 for ri, (rd, (ss, pts, lvl), h) in enumerate(zip(roads, prof, H)):
     cls, sub, w = rd['cls'], rd['sub'], rd['w']
     if sub in ('driveway', 'parking_aisle', 'alley') or cls in ('service', 'living_street'): continue
     n = lanes_dir(rd); w = WJ[ri]
     if rd['ow']:
         for k in range(1, n): dashes(pts, h, -w / 2 + k * w / n, 3, 9, 0.08, WHITE, ri)
-        if cls in ('motorway', 'trunk') or sub == 'link' or n >= 3:
+        if cls in ('motorway', 'trunk') or sub == 'link' or n >= 3 or ri in DIV:
             dashes(pts, h, w / 2 - 0.4, 1, 0, 0.08, WHITE, ri, edge=True); dashes(pts, h, -w / 2 + 0.4, 1, 0, 0.08, YEL, ri, edge=True)
     else:
         if cls in ('primary', 'secondary', 'tertiary') or n >= 2:
