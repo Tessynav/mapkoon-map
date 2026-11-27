@@ -17,10 +17,14 @@ json.dump(idx, open(os.path.join(site, 'index.json'), 'w'), separators=(',', ':'
 mb = sum(t[2] for t in tiles) / 1e6
 print('tiles', len(tiles), 'MB %.1f' % mb, 'net tiles', len(nets))
 # the builder's checks (walls at junctions, piers on roads, ...): any failed chunk stops the publish
-bad = []
+bad = []; warn = []
 for f in glob.glob(os.path.join(site, 'checks', '*.json')):
     c = json.load(open(f))
     if c['failed']: bad.append((os.path.basename(f), c['failed'], c['checks']))
+    warn += c.get('where', [])
+# (Nov 27) the few look problems that don't block the map, with their place, to fix in the next round
+print('look problems to fix next:', len(warn))
+for w in warn: print('  ', w)
 for b in bad: print('CHECK FAILED in chunk', *b)
 if bad: sys.exit('map checks failed, not publishing (the live map stays as it was)')
 if len(tiles) < 0.5 * len(plan['chunks']) * 8:   # far too few tiles: stop before replacing a good map
