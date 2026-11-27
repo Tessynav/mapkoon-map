@@ -890,6 +890,7 @@ PAL = {'house': ['#a8553f', '#b9a58a', '#d8d2c4', '#8f4a3a', '#c9b79a'], 'reside
        'outbuilding': ['#8d8f93', '#a3a29c']}
 DEFH = {'house': 7.5, 'detached': 7.5, 'residential': 8.5, 'apartments': 13, 'commercial': 7, 'retail': 6, 'industrial': 8,
         'outbuilding': 3.2, 'garage': 3, 'shed': 2.6, 'school': 10, 'church': 14}
+NFL = [0]
 for r in bl:
     g = r['g']
     if g.geom_type not in ('Polygon', 'MultiPolygon') or r.get('is_underground'): continue
@@ -898,6 +899,14 @@ for r in bl:
     # or a tower whose footprint also covers its lower podium.
     hc = MH.get(r['id']); ho = r.get('height')
     hgt = ho if (ho and hc and ho >= 25 and ho > 1.4 * hc) else (hc or ho or ((r.get('num_floors') or 0) * 3.1 + 1.2 if r.get('num_floors') else None))
+    # (Nov 27: Pointe-Nord, Nuns' Island) a building mapped with its number of floors: when that says clearly taller than
+    # the height we have (a tower finished after the 2015 laser survey, or a machine-guessed height: a 27-floor tower was
+    # only 22 m), the floors win
+    fl = r.get('num_floors') or 0
+    if 1 <= fl <= 90:
+        hf = fl * 3.1 + 1.2
+        # (with a laser height, which is measured, only a clearly newer tower beats it)
+        if hgt and ((hc and hf >= 25 and hf > 1.6 * hgt) or (not hc and hf >= 12 and hf > 1.35 * hgt)): hgt = hf; NFL[0] += 1
     area = g.area
     if not hgt: hgt = DEFH.get(cls, 6.5 if area < 150 else 9 if area < 900 else 12)
     if area < 40: hgt = min(hgt, 3.5)
@@ -1057,6 +1066,7 @@ def pack(hdr, bufs, magic):
     return magic + struct.pack('<I', len(hj)) + hj + b''.join(pad4(b) for b in bufs)
 
 
+print('buildings raised to their mapped number of floors', NFL[0], flush=True)
 written = []; tot = 0; totraw = 0
 for tk, L in tiles.items():
     if not owned(tk): continue
