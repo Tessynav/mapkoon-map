@@ -69,13 +69,16 @@ if __name__ == '__main__':
     work = os.path.dirname(os.path.abspath(out)) or '.'
     if not src:
         src = os.path.join(work, 'source.osm.pbf')
-        for a in range(4):
+        # (Nov 26: one build failed on "Network is unreachable" for a few seconds; the 4 tries came right after each other)
+        # wait longer between tries: 30 s, 1, 2, 4 minutes
+        import time
+        for a in range(5):
             try:
                 with urllib.request.urlopen(SRC, timeout=600) as r, open(src, 'wb') as f: shutil.copyfileobj(r, f, 2 ** 22)
                 break
             except Exception as e:
-                if a == 3: raise
-                print('retry download', e, flush=True)
+                if a == 4: raise
+                print('retry download in', 30 * 2 ** a, 's:', e, flush=True); time.sleep(30 * 2 ** a)
         print('downloaded MB', os.path.getsize(src) // 2 ** 20, flush=True)
     cut = os.path.join(work, 'area.osm.pbf')
     subprocess.run(['osmium', 'extract', '-b', bb, '-s', 'smart', '--overwrite', '-o', cut, src], check=True)
