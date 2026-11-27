@@ -3,7 +3,8 @@
   python osm.py W,S,E,N out.json [source.osm.pbf]
 
 Downloads the Québec extract from Geofabrik (unless a file is given), cuts the area with osmium, and keeps for every road
-its OpenStreetMap way id -> {ln: lanes, lf/lb: lanes forward/backward, wd: width (m), ow: one-way, tl: lane arrows}.
+its OpenStreetMap way id -> {ln: lanes, lf/lb: lanes forward/backward, wd: width (m), ow: one-way, tl: lane arrows,
+lm: 0 when mapped with no painted lines}; and for every crosswalk way {xc: crossing, xm: crossing:markings, xr: crossing_ref}.
 The builder joins these to Overture's roads through each road's OpenStreetMap source id."""
 import sys, os, re, json, subprocess, urllib.request, shutil
 import osmium
@@ -47,6 +48,13 @@ class H(osmium.SimpleHandler):
 
     def way(self, w):
         t = w.tags; hw = t.get('highway')
+        # (step 1, Nov 27) crosswalk ways: their crossing type, so only really painted crosswalks are drawn
+        if hw in ('footway', 'cycleway', 'path') and (t.get('footway') == 'crossing' or t.get('cycleway') == 'crossing' or t.get('path') == 'crossing'):
+            rec = {}
+            for k, o in (('crossing', 'xc'), ('crossing:markings', 'xm'), ('crossing_ref', 'xr')):
+                if t.get(k): rec[o] = t.get(k)[:20]
+            if rec: self.out[w.id] = rec
+            return
         if not hw or t.get('area') == 'yes' or (hw not in CLS and hw not in LINKS): return
         ramp = hw in LINKS; cls = CLS[hw[:-5] if ramp else hw]; sv = t.get('service', '')
         ow = 1 if (t.get('oneway') in ('yes', '1', 'true') or t.get('junction') == 'roundabout' or hw == 'motorway') else (-1 if t.get('oneway') in ('-1', 'reverse') else 0)
@@ -60,6 +68,7 @@ class H(osmium.SimpleHandler):
         if lf: rec['lf'] = lf
         if lb: rec['lb'] = lb
         if tl: rec['tl'] = tl
+        if t.get('lane_markings') == 'no': rec['lm'] = 0     # (step 1: a street mapped with no painted lines: no centre line)
         self.out[w.id] = rec
 
 
@@ -84,5 +93,6 @@ if __name__ == '__main__':
     subprocess.run(['osmium', 'extract', '-b', bb, '-s', 'smart', '--overwrite', '-o', cut, src], check=True)
     h = H(); h.apply_file(cut)
     json.dump(h.out, open(out, 'w'), separators=(',', ':'))
-    print('roads with OpenStreetMap details', len(h.out), 'with lanes', sum(1 for v in h.out.values() if v['ln']), flush=True)
+    print('roads with OpenStreetMap details', sum(1 for v in h.out.values() if 'ln' in v), 'with lanes', sum(1 for v in h.out.values() if v.get('ln')),
+          'crosswalks with a type', sum(1 for v in h.out.values() if 'ln' not in v), flush=True)
     for f in (cut,) + (() if len(sys.argv) > 3 else (src,)): os.remove(f)
