@@ -213,6 +213,74 @@ for rd, (ss, pts, lvl) in zip(roads, prof):
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import landmarks
 print('champlain deck points raised', landmarks.apply_heights(roads, prof, H))
+# (Nov 26: "why is the road wide in front and thin behind? v2 didn't have this") where a road piece carries on into the
+# next and their widths differ (a lane added or dropped), both meet at the same width and taper over up to 60 m, so
+# the edges and lane lines flow without a step: the same rule as the v2 app (widthsAlong)
+from collections import defaultdict
+ENDS = [((round(p[0][0], 1), round(p[0][1], 1)), (round(p[-1][0], 1), round(p[-1][1], 1))) for (_, p, _) in prof]
+END_AT = defaultdict(list)
+for i, e in enumerate(ENDS):
+    for k in set(e): END_AT[k].append(i)
+
+
+def end_dir(i, k):
+    p = prof[i][1]; d = p[1] - p[0] if k == 0 else p[-2] - p[-1]; return d / (np.linalg.norm(d) + 1e-9)
+
+
+def ends_at(i, key): return [k for k in (0, 1) if ENDS[i][k] == key]
+
+
+def straightness(i, j):
+    """how straight j carries on from i where they share an end (1 = dead straight)"""
+    best = -1.0
+    for ka, ea in enumerate(ENDS[i]):
+        for kb, eb in enumerate(ENDS[j]):
+            if ea == eb: best = max(best, -float(np.dot(end_dir(i, ka), end_dir(j, kb))))
+    return best
+
+
+def straight_on(i, j): return straightness(i, j) > 0.85
+
+
+def cont(i, k):
+    """the piece that carries straight on from road i's end k (or None)"""
+    key = ENDS[i][k]; best, bd = None, 0.85
+    for j in END_AT[key]:
+        if j == i: continue
+        for kj in ends_at(j, key):
+            d = -float(np.dot(end_dir(i, k), end_dir(j, kj)))
+            if d > bd: bd, best = d, (j, kj)
+    return best
+
+
+def joint_w(i, k):
+    c = cont(i, k)
+    if c is None: return roads[i]['w']
+    j, kj = c; cc = cont(j, kj)
+    return (roads[j]['w'] + roads[cc[0]]['w']) / 2 if cc is not None else roads[j]['w']
+
+
+WJ = []
+for i, (rd, (ss, pts, lvl)) in enumerate(zip(roads, prof)):
+    W = rd['w']; L = ss[-1]; T_ = min(60.0, L / 2) or 1.0; v = np.full(len(ss), float(W))
+    if len(ss) >= 2 and rd['sub'] not in ('driveway', 'parking_aisle'):
+        w0, w1 = joint_w(i, 0), joint_w(i, 1)
+        v += np.where(ss < T_, (w0 - W) * (1 - ss / T_), 0.0) + np.where(L - ss < T_, (w1 - W) * (1 - (L - ss) / T_), 0.0)
+    WJ.append(v)
+print('road pieces with a tapered width', sum(1 for v, rd in zip(WJ, roads) if np.ptp(v) > 0.05), flush=True)
+
+
+def taper_poly(pts, wj):
+    """a road's ground shape with its width changing along it (round ends, like the plain buffer)"""
+    if np.ptp(wj) <= 0.05: return LineString(pts).buffer(float(wj[0]) / 2, cap_style='round', join_style='round', quad_segs=3)
+    d = np.gradient(pts, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9); nrm = np.column_stack([-d[:, 1], d[:, 0]])
+    hw = (wj / 2)[:, None]; A = pts + nrm * hw; B = pts - nrm * hw
+    parts = [Polygon(np.vstack([A, B[::-1]])).buffer(0), Point(pts[0]).buffer(float(wj[0]) / 2, quad_segs=3), Point(pts[-1]).buffer(float(wj[-1]) / 2, quad_segs=3)]
+    # (each segment as its own quad too, so a tight bend can't fold the outline)
+    for k in range(len(pts) - 1):
+        parts.append(Polygon([A[k], A[k + 1], B[k + 1], B[k]]).buffer(0))
+    return unary_union(parts)
+
 
 
 PIERS = []
@@ -235,7 +303,8 @@ def offset_strip(pts, hh, half, y0, col, lname, side_col=None):
     n = len(pts)
     if n < 2: return
     d = np.gradient(pts, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9); nx, nz = -d[:, 1], d[:, 0]
-    L = pts + np.column_stack([nx, nz]) * half; R = pts - np.column_stack([nx, nz]) * half
+    hv = np.broadcast_to(np.asarray(half, dtype=float), (n,))[:, None]; half = float(hv.mean())   # (one width, or one per point)
+    L = pts + np.column_stack([nx, nz]) * hv; R = pts - np.column_stack([nx, nz]) * hv
     for k0 in range(0, n - 1, 60):   # chunks, each in the tile of its start
         k1 = min(n, k0 + 61); tk = tile_of(*pts[k0])
         P = []; C = []; I = []; E = []
@@ -303,19 +372,18 @@ def offset_strip(pts, hh, half, y0, col, lname, side_col=None):
 ASPH = [58, 61, 68]
 flat_parts = {k: [] for k in ('road', 'drive')}
 lifted_parts = []
-for rd, (ss, pts, lvl), h in zip(roads, prof, H):
+for rd, (ss, pts, lvl), h, wj in zip(roads, prof, H, WJ):
     up = h > 0.15
     # ground pieces
     runs = []; cur = []
     for i in range(len(ss)):
-        if not up[i]: cur.append(pts[i])
+        if not up[i]: cur.append(i)
         else:
             if len(cur) > 1: runs.append(cur)
-            cur = [pts[i]] if False else []
+            cur = []
     if len(cur) > 1: runs.append(cur)
-    for rpts in runs:
-        flat_parts['drive' if rd['sub'] in ('driveway', 'parking_aisle', 'alley') else 'road'].append(
-            LineString(rpts).buffer(rd['w'] / 2, cap_style='round', join_style='round', quad_segs=3))
+    for ix in runs:
+        flat_parts['drive' if rd['sub'] in ('driveway', 'parking_aisle', 'alley') else 'road'].append(taper_poly(pts[ix], wj[ix]))
     # lifted pieces (with a little overlap into the ground pieces)
     i = 0
     while i < len(ss):
@@ -323,7 +391,7 @@ for rd, (ss, pts, lvl), h in zip(roads, prof, H):
             j = i
             while j < len(ss) and up[j]: j += 1
             a, b = max(0, i - 1), min(len(ss), j + 1)
-            offset_strip(pts[a:b], h[a:b], rd['w'] / 2, 0.06, ASPH, 'road', side_col=[150, 154, 162])
+            offset_strip(pts[a:b], h[a:b], wj[a:b] / 2, 0.06, ASPH, 'road', side_col=[150, 154, 162])
             rd.setdefault('lifted', []).append((a, b))
             if max(h[a:b]) > 3: lifted_parts.append(LineString(pts[a:b]).buffer(rd['w'] / 2 + 1.5, cap_style='flat'))
             i = j
@@ -458,23 +526,141 @@ for rd in roads:
 JZ = unary_union([Point(k).buffer(9) for k, v in cnt.items() if v >= 3]) if cnt else None
 
 
-def dashes(pts, hh, off, dash, gap, half_w, col):
+# (Nov 26 18:17 drive, Brossard: where a ramp joins another at a narrow angle, each drew its edge lines across the
+# other's surface, so the lines crossed in an X) every road's surface; a line is not painted where it lies on another
+# road's surface at the same height, unless its own road is the more important one (class, then width)
+from shapely.strtree import STRtree
+from collections import defaultdict
+RANK = {'motorway': 9, 'trunk': 8, 'primary': 7, 'secondary': 6, 'tertiary': 5, 'unclassified': 4, 'residential': 4,
+        'living_street': 2, 'service': 1}
+SURF = []; SURF_I = []
+for i, (rd, (ss, pts, lvl)) in enumerate(zip(roads, prof)):
+    if len(pts) < 2: continue
+    SURF.append(LineString(pts).buffer(0.5, cap_style='flat').union(taper_poly(pts, WJ[i]).buffer(-0.15))); SURF_I.append(i)
+SURF_T = STRtree(SURF)
+PLINE = [LineString(p) if len(p) >= 2 else None for (_, p, _) in prof]
+PAINT = []   # (road, painted solid line, height): for the check below
+GORE_PAIR = set(); CUT = {}   # filled in at the merges, below
+ENDS = [((round(p[0][0], 1), round(p[0][1], 1)), (round(p[-1][0], 1), round(p[-1][1], 1))) for (_, p, _) in prof]
+
+
+def rank(rd): return (RANK.get(rd['cls'], 3) * 2 - (1 if rd['sub'] == 'link' else 0), rd['w'])
+
+
+def end_dir(i, k):
+    p = prof[i][1]; d = p[1] - p[0] if k == 0 else p[-2] - p[-1]; return d / (np.linalg.norm(d) + 1e-9)
+
+
+def straightness(i, j):
+    """how straight j carries on from i where they share an end (1 = dead straight, below 0.85 = not a continuation)"""
+    best = -1.0
+    for ka, ea in enumerate(ENDS[i]):
+        for kb, eb in enumerate(ENDS[j]):
+            if ea == eb: best = max(best, -float(np.dot(end_dir(i, ka), end_dir(j, kb))))
+    return best
+
+
+def straight_on(i, j):
+    """j simply continues i (same line split in two pieces): they share an end and leave it in opposite directions"""
+    return straightness(i, j) > 0.85
+
+
+END_AT = defaultdict(list)
+for i, e in enumerate(ENDS):
+    for k in e: END_AT[k].append(i)
+# how straight a road carries on through its ends: the main line scores near 1, a road joining it at an angle lower
+THRU = [max([straightness(i, j) for k in ENDS[i] for j in END_AT[k] if j != i] + [-1.0]) for i in range(len(roads))]
+
+
+def on_other(ri, x, z, y):
+    """this spot of road ri's paint lies on another, more important (or equal) road's surface at the same height"""
+    p = Point(x, z); me = rank(roads[ri])
+    for k in SURF_T.query(p):
+        j = SURF_I[k]
+        if j == ri or not SURF[k].contains(p) or (ri, j) in GORE_PAIR: continue
+        rj = roads[j]
+        if rj['sub'] in ('driveway', 'parking_aisle') or rank(rj) < me: continue
+        if rank(rj) == me and THRU[ri] > THRU[j] + 0.005: continue    # the joining road gives way to the main line
+        ss = prof[j][0]; s = PLINE[j].project(p); hj = float(np.interp(s, ss, H[j]))
+        if abs(hj - y) > 1.5: continue                        # a bridge over (or under) it
+        if straight_on(ri, j): continue
+        return True
+    return False
+
+
+def edge_covered(ri, x, z, y, t):
+    """(Nov 26, Mazen: "there should be common sense in road lines") an edge line marks the edge of the asphalt, so it
+    is left out wherever that spot is covered by any other road at the same height (a ramp joining or widening it, a
+    street crossing it), whatever road it is. Not counted: the next piece of the same road, and the other direction of a
+    divided road running alongside (each keeps its own line)"""
+    p = Point(x, z)
+    for k in SURF_T.query(p):
+        j = SURF_I[k]
+        if j == ri or not SURF[k].contains(p): continue
+        rj = roads[j]
+        if rj['sub'] in ('driveway', 'parking_aisle'): continue
+        ss, pts, _ = prof[j]; s = PLINE[j].project(p)
+        if abs(float(np.interp(s, ss, H[j])) - y) > 1.5: continue
+        if straight_on(ri, j): continue
+        i = min(len(pts) - 2, int(np.searchsorted(ss, s, side='right')) - 1); u = pts[i + 1] - pts[i]; u = u / (np.linalg.norm(u) + 1e-9)
+        if rj['ow'] and roads[ri]['ow'] and float(np.dot(u, t)) < -0.9:
+            # (the other direction: each keeps its own line, until the two would cross)
+            ww = float(np.interp(s, ss, WJ[j]))
+            if PLINE[j].distance(p) > ww / 2 - 0.2: continue
+        return True
+    return False
+
+
+def dashes(pts, hh, off, dash, gap, half_w, col, ri=None, edge=False):
     """a painted line 'off' metres to the side of the centre, dashed (gap>0) or solid"""
     if len(pts) < 2: return
     d = np.gradient(pts, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9); nrm = np.column_stack([-d[:, 1], d[:, 0]])
-    c = pts + nrm * off
+    offv = np.broadcast_to(np.asarray(off, dtype=float), (len(pts),)); off = float(offv.mean())   # (one offset, or one per point: tapered roads)
+    c = pts + nrm * offv[:, None]
     seg_len = np.r_[0, np.cumsum(np.linalg.norm(np.diff(c, axis=0), axis=1))]
-    Ltot = seg_len[-1]; per = dash + gap if gap > 0 else Ltot + 1
-    s = 0.0
+    Ltot = seg_len[-1]; s = 0.0
+    ssc_ = np.r_[0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+    # (at a merge, the inner edge line stops at the tip where it meets the other road's inner edge)
+    if ri is not None and gap <= 0:
+        sd = 1 if off > 0 else -1
+        for k in (0, 1):
+            cut = CUT.get((ri, sd, k))
+            if cut is None: continue
+            ssc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))]
+            co = float(np.interp(cut, ssc, seg_len))
+            if k == 1: Ltot = min(Ltot, co - 0.05)
+            else: s = max(s, co + 0.05)
+    # pieces: each dash, or a solid line cut every 2 m (so only the part over the other road is left out)
+    piece = dash if gap > 0 else 2.0; per = dash + gap if gap > 0 else 2.0
+    run = []
+
+    def flush():
+        if len(run) >= 2:
+            P = np.column_stack([np.interp(run, seg_len, c[:, 0]), np.interp(run, seg_len, c[:, 1])])
+            Y = np.interp(run, seg_len, hh); offset_strip(P, Y, half_w, 0.09, col, 'paint')
+            if gap <= 0 and ri is not None: PAINT.append((ri, LineString(P), Y.copy()))
+        run.clear()
     while s < Ltot - 0.3:
-        e = min(Ltot, s + (dash if gap > 0 else Ltot))
-        ks = np.linspace(s, e, max(2, int((e - s) / 3) + 2))
-        P = np.column_stack([np.interp(ks, seg_len, c[:, 0]), np.interp(ks, seg_len, c[:, 1])])
-        Y = np.interp(ks, seg_len, hh)
-        mid = Point(P[len(P) // 2])
-        if JZ is None or not JZ.contains(mid):
-            offset_strip(P, Y, half_w, 0.09, col, 'paint')
+        e = min(Ltot, s + piece); m = (s + e) / 2
+        mx, mz = float(np.interp(m, seg_len, c[:, 0])), float(np.interp(m, seg_len, c[:, 1]))
+        if edge and ri is not None:
+            sc = float(np.interp(m, seg_len, ssc_)); kk = min(len(pts) - 2, int(np.searchsorted(ssc_, sc, side='right')) - 1)
+            t = pts[kk + 1] - pts[kk]; t = t / (np.linalg.norm(t) + 1e-9)
+            ok = not any(edge_covered(ri, float(np.interp(q, seg_len, c[:, 0])), float(np.interp(q, seg_len, c[:, 1])), float(np.interp(q, seg_len, hh)), t) for q in (s, m, e))
+        else:
+            ok = JZ is None or not JZ.contains(Point(mx, mz))
+            # (the piece's ends too: a piece half on the other road would still poke across its line)
+            if ok and ri is not None:
+                ok = not any(on_other(ri, float(np.interp(q, seg_len, c[:, 0])), float(np.interp(q, seg_len, c[:, 1])), float(np.interp(q, seg_len, hh))) for q in (s, m, e))
+        if not ok: flush()
+        elif gap > 0:
+            run.extend(np.linspace(s, e, max(2, int((e - s) / 3) + 2))); flush()
+        else:
+            if run and abs(run[-1] - s) < 1e-6: run.append(e)
+            else: flush(); run.extend([s, e])
+            if len(run) > 40: last = run[-1]; flush(); run.append(last)
         s += per
+    flush()
 
 
 def lanes_dir(rd):
@@ -487,20 +673,85 @@ def lanes_dir(rd):
     return 1
 
 
-for rd, (ss, pts, lvl), h in zip(roads, prof, H):
+# ---- merges and splits (Nov 26: Mazen's drawing of the Brossard ramps): where two one-way roads join into one (or one
+# splits in two) at a narrow angle, the outer edge lines carry on into the joined road, the two inner edge lines meet
+# in a V at the tip, and the wedge between them is hatched with white stripes (no blank patch, no crossing lines)
+def has_edges(rd):
+    return rd['ow'] and (rd['cls'] in ('motorway', 'trunk') or rd['sub'] == 'link' or lanes_dir(rd) >= 3)
+
+
+def edge_pts(i, sign):
+    pts = prof[i][1]; d = np.gradient(pts, axis=0); d /= (np.linalg.norm(d, axis=1)[:, None] + 1e-9)
+    return pts + np.column_stack([-d[:, 1], d[:, 0]]) * sign * (WJ[i] / 2 - 0.4)[:, None]
+
+
+GORES = []; ngore = 0
+for key, ids in END_AT.items():
+    if len(ids) != 3 or len(set(ids)) != 3 or not all(roads[i]['ow'] and has_edges(roads[i]) for i in ids): continue
+    dirs = {i: end_dir(i, 0 if ENDS[i][0] == key else 1) for i in ids}
+    pick = None
+    for c in ids:
+        a, b = [i for i in ids if i != c]
+        if np.dot(dirs[a], dirs[c]) < -0.7 and np.dot(dirs[b], dirs[c]) < -0.7 and np.dot(dirs[a], dirs[b]) > 0.7: pick = (a, b, c)
+    if pick is None: continue
+    a, b, c = pick
+    if max(abs(float(np.interp(PLINE[i].project(Point(key)), prof[i][0], H[i])) - float(H[c][0 if ENDS[c][0] == key else -1])) for i in (a, b)) > 1.5: continue
+    sides = {}
+    for i, o in ((a, b), (b, a)):
+        ss_i, pts_i, _ = prof[i]; k = 0 if ENDS[i][0] == key else 1
+        sb = min(15.0, ss_i[-1] / 2); s_back = sb if k == 0 else ss_i[-1] - sb
+        P = np.array(PLINE[i].interpolate(s_back).coords[0]); Q = np.array(PLINE[o].interpolate(PLINE[o].project(Point(P))).coords[0])
+        j = int(np.argmin(np.abs(ss_i - s_back))); d = pts_i[min(j + 1, len(pts_i) - 1)] - pts_i[max(j - 1, 0)]; nrm = np.array([-d[1], d[0]])
+        sides[i] = (1 if np.dot(nrm, Q - P) > 0 else -1, k)
+    la = LineString(edge_pts(a, sides[a][0])); lb = LineString(edge_pts(b, sides[b][0]))
+    x = la.intersection(lb)
+    pts_x = [x] if x.geom_type == 'Point' else [g for g in getattr(x, 'geoms', []) if g.geom_type == 'Point']
+    pts_x = [p for p in pts_x if p.distance(Point(key)) < 200]
+    if not pts_x: continue
+    TIP = min(pts_x, key=lambda p: p.distance(Point(key)))
+    # alike roads: both inner lines stop at the tip (the V). A narrower road joining a bigger one: only its own inner line
+    # stops there; the big road's edge line carries on, as on a real on-ramp
+    same = rank(roads[a]) == rank(roads[b])
+    low = None if same else min((a, b), key=lambda i: rank(roads[i]))
+    for i in ((a, b) if same else (low,)):
+        CUT[(i, sides[i][0], sides[i][1])] = PLINE[i].project(TIP)     # (a road can have a merge at each end)
+    big_surf = None if same else SURF[SURF_I.index(a if low == b else b)]
+    # (the two joining roads leave each other's lines alone when alike; when one is wider, its surface still wins)
+    for u, v in ((a, c), (b, c)) + (((a, b),) if rank(roads[a]) == rank(roads[b]) else ()):
+        GORE_PAIR.add((u, v)); GORE_PAIR.add((v, u))
+    GORES.append(Point(key).buffer(9.5)); ngore += 1
+    # the hatching: slanted white stripes across the wedge, from the tip back until it is 6 m wide (at most 60 m)
+    ta, tb = la.project(TIP), lb.project(TIP); da = -1 if sides[a][1] == 1 else 1; db = -1 if sides[b][1] == 1 else 1
+    dd = 2.0
+    while dd < 60:
+        sa_, sb_ = ta + da * dd, tb + db * (dd + 1.8)
+        if not (0 <= sa_ <= la.length and 0 <= sb_ <= lb.length): break
+        pa = np.array(la.interpolate(sa_).coords[0]); pb = np.array(lb.interpolate(sb_).coords[0]); gw = np.linalg.norm(pb - pa)
+        if gw > 6.5: break
+        # (the narrower road's side of the wedge must be off the big road, else there is no wedge to hatch there)
+        if big_surf is not None and big_surf.contains(Point(pb if low == b else pa)): break
+        if gw > 0.8:
+            u = (pb - pa) / gw; P = np.array([pa + u * 0.25, pb - u * 0.25])
+            Y = np.array([float(np.interp(PLINE[a].project(Point(pa)), prof[a][0], H[a])), float(np.interp(PLINE[b].project(Point(pb)), prof[b][0], H[b]))])
+            offset_strip(P, Y, 0.15, 0.09, WHITE, 'paint')
+        dd += 2.5
+if GORES and JZ is not None: JZ = JZ.difference(unary_union(GORES))      # no blank patch at a merge
+print('merges with a hatched tip', ngore, flush=True)
+
+for ri, (rd, (ss, pts, lvl), h) in enumerate(zip(roads, prof, H)):
     cls, sub, w = rd['cls'], rd['sub'], rd['w']
     if sub in ('driveway', 'parking_aisle', 'alley') or cls in ('service', 'living_street'): continue
-    n = lanes_dir(rd)
+    n = lanes_dir(rd); w = WJ[ri]
     if rd['ow']:
-        for k in range(1, n): dashes(pts, h, -w / 2 + k * w / n, 3, 9, 0.08, WHITE)
+        for k in range(1, n): dashes(pts, h, -w / 2 + k * w / n, 3, 9, 0.08, WHITE, ri)
         if cls in ('motorway', 'trunk') or sub == 'link' or n >= 3:
-            dashes(pts, h, w / 2 - 0.4, 1, 0, 0.08, WHITE); dashes(pts, h, -w / 2 + 0.4, 1, 0, 0.08, YEL)
+            dashes(pts, h, w / 2 - 0.4, 1, 0, 0.08, WHITE, ri, edge=True); dashes(pts, h, -w / 2 + 0.4, 1, 0, 0.08, YEL, ri, edge=True)
     else:
         if cls in ('primary', 'secondary', 'tertiary') or n >= 2:
-            dashes(pts, h, 0.12, 1, 0, 0.06, YEL); dashes(pts, h, -0.12, 1, 0, 0.06, YEL)
+            dashes(pts, h, 0.12, 1, 0, 0.06, YEL, ri); dashes(pts, h, -0.12, 1, 0, 0.06, YEL, ri)
             for k in range(1, n):
-                o = k * (w / 2) / n; dashes(pts, h, o, 3, 9, 0.07, WHITE); dashes(pts, h, -o, 3, 9, 0.07, WHITE)
-        elif cls in ('residential', 'unclassified') and w >= 8: dashes(pts, h, 0, 3, 6, 0.06, YEL)
+                o = k * (w / 2) / n; dashes(pts, h, o, 3, 9, 0.07, WHITE, ri); dashes(pts, h, -o, 3, 9, 0.07, WHITE, ri)
+        elif cls in ('residential', 'unclassified') and rd['w'] >= 8: dashes(pts, h, 0, 3, 6, 0.06, YEL, ri)
 
 # crosswalks from the data: white bars along the crossing
 for r in seg:
@@ -758,7 +1009,21 @@ chk['too_high_road'] = sum(1 for rd, (ss, pts, lvl), h in zip(roads, prof, H) if
 # (Nov 26: Boucherville has roads that come from TomTom, not OpenStreetMap; they can't have its lanes, so they don't count)
 own_roads = [rd for rd, (ss, pts, lvl) in zip(roads, prof) if owned(tile_of(*pts[0])) and rd.get('osmsrc')]
 chk['roads_without_osm_pct'] = round(100.0 * sum(1 for rd in own_roads if not rd.get('osm')) / len(own_roads), 1) if len(own_roads) >= 50 else 0.0
-LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0}
+# (Nov 26 18:17 drive, Brossard: two ramps' edge lines crossed in an X where one joins the other) solid lines of two
+# different roads must never cross at the same height
+crossed = 0
+if PAINT:
+    PT = STRtree([g for _, g, _ in PAINT])
+    for a, (ia, ga, ya) in enumerate(PAINT):
+        for b in PT.query(ga):
+            ib, gb, yb = PAINT[b]
+            if b <= a or ib == ia or straight_on(ia, ib) or not ga.crosses(gb): continue
+            x = ga.intersection(gb); x = x if x.geom_type == 'Point' else x.centroid
+            hy = lambda g, Y: float(Y[int(np.argmin(np.hypot(np.array(g.coords)[:, 0] - x.x, np.array(g.coords)[:, 1] - x.y)))])
+            if abs(hy(ga, ya) - hy(gb, yb)) > 1.5: continue                  # one passes over the other
+            if owned(tile_of(x.x, x.y)): crossed += 1
+chk['lines_crossing'] = crossed
+LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0, 'lines_crossing': 0}
 failed = [k for k, v in chk.items() if v > LIMITS[k]]
 os.makedirs(os.path.join(OUT, 'checks'), exist_ok=True)
 json.dump({'checks': chk, 'failed': failed}, open(os.path.join(OUT, 'checks', ('%d_%d.json' % (TX0, TZ0)) if A.tiles else 'all.json'), 'w'))
