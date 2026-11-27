@@ -600,7 +600,8 @@ def edge_covered(ri, x, z, y, t):
         rj = roads[j]
         if rj['sub'] in ('driveway', 'parking_aisle'): continue
         ss, pts, _ = prof[j]; s = PLINE[j].project(p)
-        if abs(float(np.interp(s, ss, H[j])) - y) > 1.5: continue
+        if abs(float(np.interp(s, ss, H[j])) - y) > 2.5: continue          # (a little looser than the check's 1.5 m: a road just
+        # starting to climb onto a bridge still covers the line; Nov 26 build: two spots at 1.52 m slipped through)
         if straight_on(ri, j): continue
         i = min(len(pts) - 2, int(np.searchsorted(ss, s, side='right')) - 1); u = pts[i + 1] - pts[i]; u = u / (np.linalg.norm(u) + 1e-9)
         if rj['ow'] and roads[ri]['ow'] and float(np.dot(u, t)) < -0.9:
