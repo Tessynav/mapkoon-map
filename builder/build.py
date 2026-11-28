@@ -199,6 +199,15 @@ for r in seg:
     roads.append(dict(g=r['g'], cls=r['class'], sub=sub, w=w, ow=ow, lv=lv, fl=fl, id=r['id'], nm=(r.get('names') or {}).get('primary'),
                       ln=ln, lf=lf, lb=lb, osm=bool(o), osmsrc=osm_id(r) is not None, lm=(o or {}).get('lm', 1)))
 print('roads', len(roads), 'with OpenStreetMap lanes/width', nosm)
+# (Nov 27) real widths: measured across the City of Montréal's curb outlines where it has the street (city.py)
+try:
+    import city as _city
+    _rb = np.array([rd['g'].bounds for rd in roads]) if roads else np.zeros((1, 4))
+    _cu = _city.load(os.path.join(D, 'city.json.gz'), (_rb[:, 0].min() - 30, _rb[:, 1].min() - 30, _rb[:, 2].max() + 30, _rb[:, 3].max() + 30))
+    _city.widths(roads, _cu, log=lambda m: print(m, flush=True))
+    del _cu
+except Exception as _e:
+    print('city widths skipped:', _e, flush=True)
 
 STEP = 4.0; RAMP = 90.0; LH = 6.5   # sampling (m), ramp length (m), height per level (m)
 
@@ -699,7 +708,7 @@ def dashes(pts, hh, off, dash, gap, half_w, col, ri=None, edge=False):
 
 def lanes_dir(rd):
     """lanes in each direction: from OpenStreetMap when mapped, else from the width (the paint and lane lock both use this)"""
-    w, ln = rd['w'], rd.get('ln') or 0
+    w, ln = rd.get('w0', rd['w']), rd.get('ln') or 0   # (the estimate: a real width with parking isn't more lanes)
     if rd['ow']: return ln if ln > 0 else max(1, round(w / 3.6))
     if rd.get('lf') and rd.get('lb'): return max(1, min(rd['lf'], rd['lb']))
     if ln >= 2: return max(1, ln // 2)
@@ -1229,11 +1238,14 @@ chk['building_below_floors'] = BAUD['below_floors']
 chk['surface_holes'] = FILLGAP[1]
 # for information (not a failure): buildings with no height in any source get a typical height for their type
 chk['buildings_typical_height_pct'] = round(100.0 * BAUD['no_height_data'] / max(1, BAUD['buildings']), 1)
+# for information: streets whose width was measured on the city's curbs (0 outside the City of Montréal)
+_st = [rd for rd in roads if normal(rd)]
+chk['streets_real_width_pct'] = round(100.0 * sum(1 for rd in _st if rd.get('wsrc')) / max(1, len(_st)), 1)
 LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_without_osm_pct': 25.0, 'lines_crossing': 0,
           # (Nov 27 build #12: 3 roads in the whole city blocked every other fix) the look checks block the map only when
           # a chunk has more than a few; a few are printed with their place ('audit:' lines) to fix in the next round
           'street_no_centre_line': 3, 'divided_half_unpainted': 3, 'lanes_no_lines': 3, 'zebra_few_bars': 3,
-          'building_below_floors': 3, 'buildings_typical_height_pct': 100, 'surface_holes': 0}
+          'building_below_floors': 3, 'buildings_typical_height_pct': 100, 'surface_holes': 0, 'streets_real_width_pct': 101}
 failed = [k for k, v in chk.items() if v > LIMITS[k]]
 os.makedirs(os.path.join(OUT, 'checks'), exist_ok=True)
 json.dump({'checks': chk, 'failed': failed, 'where': AUD}, open(os.path.join(OUT, 'checks', ('%d_%d.json' % (TX0, TZ0)) if A.tiles else 'all.json'), 'w'))
