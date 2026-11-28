@@ -44,6 +44,11 @@ jobs:
           sudo apt-get update -q && sudo apt-get install -y -q osmium-tool
           B=$(python -c "import json;b=json.load(open('plan/plan.json'))['bbox'];print('%f,%f,%f,%f'%(b[0]-0.01,b[1]-0.01,b[2]+0.01,b[3]+0.01))")
           python builder/osm.py "$B" plan/osm_ways.json
+      - name: Real road widths from the City of Montréal (the "city" branch, made by Get city roads)
+        continue-on-error: true
+        run: |
+          git fetch --depth 1 origin city && git worktree add city-data FETCH_HEAD
+          python builder/city.py prep city-data plan/city.json.gz
       - uses: actions/upload-artifact@v4
         with: { name: plan, path: plan/, retention-days: 2 }
 
@@ -90,6 +95,7 @@ jobs:
           read T B < <(python -c "import json;c=[c for c in json.load(open('plan/plan.json'))['chunks'] if c['id']=='${{ matrix.chunk }}'][0];print(c['tiles'],c['bbox'])")
           python builder/overture.py read plan/idx.json "$B" data
           cp plan/osm_ways.json data/
+          cp plan/city.json.gz data/ 2>/dev/null || echo 'no city widths file: estimated widths'
           python builder/build.py data out --tiles="$T" --heights h
       - uses: actions/upload-artifact@v4
         with: { name: 'tiles-${{ matrix.chunk }}', path: out/, retention-days: 2 }
