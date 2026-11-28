@@ -1,0 +1,46 @@
+# Downloads the Ville de Montréal property assessment units ("unités d'évaluation foncière", CC BY 4.0): for every lot,
+# its number of floors and year built. Keeps a small copy (lot outline, floors, year) on the "citybld" branch, for the
+# map builder's building heights (buildings built after the 2015 laser survey, Nov 27 south Nuns' Island).
+# Actions > Get city buildings > Run workflow. Builds nothing, changes nothing in the live map.
+name: Get city buildings
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  get:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Download from donnees.montreal.ca
+        run: |
+          set -u
+          UA="Mozilla/5.0 (X11; Linux x86_64) MapKoon-builder"
+          mkdir -p raw out
+          for site in "https://donnees.montreal.ca" "https://www.donneesquebec.ca/recherche"; do
+            for id in unites-evaluation-fonciere vmtl-unites-evaluation-fonciere; do
+              code=$(curl -sL -A "$UA" -o meta.json -w '%{http_code}' "$site/api/3/action/package_show?id=$id"); echo "$site $id -> HTTP $code"
+              [ "$code" = 200 ] && break 2
+            done
+          done
+          jq -r '.result.resources[] | [.format, .name, .url] | @tsv' meta.json
+          U=$(jq -r '[.result.resources[] | select((.format|ascii_downcase)=="geojson")][0].url' meta.json)
+          echo "downloading $U"
+          curl -sL -A "$UA" "$U" -o raw/uef.bin; ls -la raw
+      - name: Keep lot outline, floors and year
+        run: python builder/citybld.py raw/uef.bin out/citybld.json.gz
+      - name: Keep it on the citybld branch
+        run: |
+          set -e
+          cd out
+          echo "Contient des données de la Ville de Montréal, licence CC BY 4.0 (https://donnees.montreal.ca)." > CREDIT.txt
+          date -u +%Y-%m-%dT%H:%MZ > DATE.txt
+          git init -q -b citybld
+          git config user.name "github-actions"; git config user.email "github-actions@users.noreply.github.com"
+          git add -A; git commit -qm "City of Montréal floors and year built $(cat DATE.txt)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" citybld
