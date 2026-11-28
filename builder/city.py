@@ -74,6 +74,23 @@ def widths(roads, U, step=5.0, keep_end=6.0, log=print):
         log('city widths: no city data here'); return 0
     PU = sprep(U)
     lines = [rd['g'] for rd in roads]; tree = STRtree(lines)
+    # (Nov 27, build #14: one dense chunk took over an hour) the city's surface is one huge shape, and every measure
+    # against all of it is slow: it is cut once into 100 m squares, and each street is measured against its own squares
+    from shapely import clip_by_rect
+    from shapely.ops import unary_union as _uu
+    x0, z0, x1, z1 = U.bounds; G = 100.0; cells = {}
+
+    def cell(i, j):
+        k = (i, j)
+        if k not in cells: cells[k] = clip_by_rect(U, i * G, j * G, (i + 1) * G, (j + 1) * G)
+        return cells[k]
+
+    def local(g):
+        a, b, c, d = g.bounds
+        parts = [cell(i, j) for i in range(int(math.floor((a - 30) / G)), int(math.floor((c + 30) / G)) + 1)
+                 for j in range(int(math.floor((b - 30) / G)), int(math.floor((d + 30) / G)) + 1)]
+        parts = [q for q in parts if not q.is_empty]
+        return _uu([q.buffer(0.01) for q in parts]) if parts else None
     CAP = {'motorway': 18, 'trunk': 18, 'primary': 24, 'secondary': 20, 'tertiary': 18, 'residential': 16,
            'unclassified': 14, 'living_street': 10}
     done = asym = 0; stats = []; why = {}
@@ -84,6 +101,8 @@ def widths(roads, U, step=5.0, keep_end=6.0, log=print):
         no('streets')
         g = rd['g']; L = g.length
         if L < 2 * keep_end + 4: no('short'); continue
+        UL = local(g)
+        if UL is None: no('few samples (not a city street?)'); continue
         ws = []; offs = []
         for s in np.arange(keep_end, L - keep_end + 0.01, step):
             m = g.interpolate(s); a = g.interpolate(max(0, s - 2)); b = g.interpolate(min(L, s + 2))
@@ -91,7 +110,7 @@ def widths(roads, U, step=5.0, keep_end=6.0, log=print):
             if n == 0 or not PU.contains(m): continue           # (inside an intersection, or not a city street)
             nx, nz = -dz / n, dx / n
             ray = LineString([(m.x - nx * 25, m.y - nz * 25), (m.x + nx * 25, m.y + nz * 25)])
-            hit = ray.intersection(U); seg = None
+            hit = ray.intersection(UL); seg = None
             for q in getattr(hit, 'geoms', [hit]):
                 if q.geom_type == 'LineString' and q.distance(m) < 0.01: seg = q
             if seg is None: continue
