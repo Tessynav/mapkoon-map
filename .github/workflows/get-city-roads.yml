@@ -1,0 +1,44 @@
+# Downloads the Ville de Montréal road outlines (curb to curb, intersections, sidewalks, islands; CC BY 4.0)
+# and keeps a zipped copy on the "city" branch, so the map builder (and Claude, for testing) can read them.
+# Actions > Get city roads > Run workflow. Takes a few minutes. Builds nothing, changes nothing in the live map.
+name: Get city roads
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  get:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download from donnees.montreal.ca
+        run: |
+          set -e
+          mkdir -p city
+          for ds in voirie-chaussee-intersection voirie-trottoir-ilot; do
+            curl -sfL "https://donnees.montreal.ca/api/3/action/package_show?id=$ds" -o meta.json
+            jq -r '.result.resources[] | select((.format|ascii_downcase)=="geojson") | .url' meta.json > urls.txt
+            echo "$ds:"; cat urls.txt
+            test -s urls.txt
+            while read -r u; do
+              n=$(basename "${u%%\?*}")
+              curl -sfL "$u" -o "city/$n"
+              gzip -9 -f "city/$n"
+              ls -la "city/$n.gz"
+            done < urls.txt
+          done
+          echo "Contient des données de la Ville de Montréal, licence CC BY 4.0 (https://donnees.montreal.ca)." > city/CREDIT.txt
+          date -u +%Y-%m-%dT%H:%MZ > city/DATE.txt
+      - name: Keep them on the city branch
+        run: |
+          set -e
+          cd city
+          git init -q -b city
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A
+          git commit -qm "City of Montréal road outlines $(cat DATE.txt)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" city
