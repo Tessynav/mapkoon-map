@@ -1,0 +1,49 @@
+# Builds one small area (about 2.5 km) twice, before and after a builder change, with the real data (laser heights,
+# city curbs, city floors), and keeps both on the "test-tiles" branch for side-by-side pictures. Changes nothing live.
+name: Test area
+
+on:
+  workflow_dispatch:
+    inputs:
+      lat: { description: 'centre latitude', default: '45.4520' }
+      lon: { description: 'centre longitude', default: '-73.5470' }
+      borough: { description: 'borough id for laser heights (e.g. verdun)', default: 'verdun' }
+      off: { description: 'environment switch for the BEFORE build', default: 'MAPKOON_NO_CITYFLOORS' }
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12', cache: pip, cache-dependency-path: builder/requirements.txt }
+      - run: pip install -r builder/requirements.txt
+      - name: Area and data
+        run: |
+          read W S E N TL <<< $(python -c "
+          import math;lat,lon=${{ inputs.lat }},${{ inputs.lon }};KX=78084.09325464224;KY=110540;x=(lon+73.5625)*KX;z=-(lat-45.4575)*KY
+          tx=math.floor(x/500);tz=math.floor(z/500);d=0.017
+          print(round(lon-d*1.45,5),round(lat-d,5),round(lon+d*1.45,5),round(lat+d,5),'%d,%d,%d,%d'%(tx-2,tz-2,tx+3,tz+3))")
+          echo "TL=$TL" >> $GITHUB_ENV
+          python builder/plan.py montreal plan > /dev/null
+          python builder/overture.py index "$W,$S,$E,$N" idx.json
+          python builder/overture.py read idx.json "$W,$S,$E,$N" data
+          python builder/heights.py "${{ inputs.borough }}" plan/plan.json idx.json "h/heights_${{ inputs.borough }}.json"
+          git fetch --depth 1 origin city && git worktree add city-data FETCH_HEAD && python builder/city.py prep city-data data/city.json.gz
+          git fetch --depth 1 origin citybld && git worktree add citybld-data FETCH_HEAD && cp citybld-data/citybld.json.gz data/
+      - name: Build before and after
+        run: |
+          env ${{ inputs.off }}=1 python builder/build.py data before --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
+          python builder/build.py data after --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
+      - name: Keep them on the test-tiles branch
+        run: |
+          set -e
+          mkdir out && mv before after out/ && cd out
+          echo "${{ inputs.lat }},${{ inputs.lon }} $TL" > AREA.txt
+          git init -q -b test-tiles
+          git config user.name "github-actions"; git config user.email "github-actions@users.noreply.github.com"
+          git add -A; git commit -qm "test area ${{ inputs.lat }},${{ inputs.lon }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" test-tiles

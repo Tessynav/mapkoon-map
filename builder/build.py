@@ -950,7 +950,35 @@ PAL = {'house': ['#a8553f', '#b9a58a', '#d8d2c4', '#8f4a3a', '#c9b79a'], 'reside
        'outbuilding': ['#8d8f93', '#a3a29c']}
 DEFH = {'house': 7.5, 'detached': 7.5, 'residential': 8.5, 'apartments': 13, 'commercial': 7, 'retail': 6, 'industrial': 8,
         'outbuilding': 3.2, 'garage': 3, 'shed': 2.6, 'school': 10, 'church': 14}
-NFL = [0]; BAUD = {'buildings': 0, 'no_height_data': 0, 'below_floors': 0}
+NFL = [0]; BAUD = {'buildings': 0, 'no_height_data': 0, 'below_floors': 0, 'below_city_floors': 0}
+# (Nov 28) the City of Montréal's assessment roll: floors above ground and year built for every lot (citybld.py). Each
+# lot's floors go to the biggest building on it (a lot with a tower and its small garage: the tower)
+CITYF = {}; NCF = [0, 0]
+try:
+    _cp = os.path.join(D, 'citybld.json.gz')
+    if os.path.exists(_cp):
+        from shapely.strtree import STRtree as _STR
+        _ab = AREA.bounds; _lots = []; _lf = []
+        for ring, fl_, yr_, *_ in json.load(gzip.open(_cp, 'rt'))['lots']:
+            xs_ = [q[0] for q in ring]; zs_ = [q[1] for q in ring]
+            if max(xs_) < _ab[0] or min(xs_) > _ab[2] or max(zs_) < _ab[1] or min(zs_) > _ab[3]: continue
+            P_ = Polygon(ring)
+            if not P_.is_valid: P_ = P_.buffer(0)
+            if not P_.is_empty: _lots.append(P_); _lf.append((fl_, yr_))
+        if _lots:
+            _t = _STR(_lots); best_ = {}
+            for i_, r in enumerate(bl):
+                g_ = r['g']
+                if g_.geom_type not in ('Polygon', 'MultiPolygon'): continue
+                c_ = g_.representative_point(); fl_ = 0; yr_ = 0; lot_ = None
+                for j_ in _t.query(c_, predicate='within'):
+                    if _lf[j_][0] > fl_: fl_, yr_, lot_ = _lf[j_][0], _lf[j_][1], int(j_)
+                    elif _lf[j_][0] == fl_ and lot_ is None: lot_ = int(j_)
+                if fl_ and (lot_ not in best_ or g_.area > best_[lot_][1]): best_[lot_] = (i_, g_.area, fl_, yr_)
+            for i_, _a, fl_, yr_ in best_.values(): CITYF[bl[i_]['id']] = (fl_, yr_)
+        print('city floors: lots', len(_lots), 'buildings given the city\'s floors', len(CITYF), flush=True)
+except Exception as _e:
+    print('city floors skipped:', _e, flush=True)
 for r in bl:
     g = r['g']
     if g.geom_type not in ('Polygon', 'MultiPolygon') or r.get('is_underground'): continue
@@ -967,6 +995,14 @@ for r in bl:
         hf = fl * 3.1 + 1.2
         # (with a laser height, which is measured, only a clearly newer tower beats it)
         if hgt and ((hc and hf >= 25 and hf > 1.6 * hgt) or (not hc and hf >= 12 and hf > 1.35 * hgt)): hgt = hf; NFL[0] += 1
+    # (Nov 28, south Nuns' Island: built after the 2015 laser survey) the city's own floors: they win for a building built
+    # since 2015, when there is no measured height, or when they say clearly taller than what we have
+    cf, cy = CITYF.get(r['id'], (0, 0))
+    if 1 <= cf <= 90 and os.environ.get('MAPKOON_NO_CITYFLOORS') != '1':   # (the env switch: for a before/after test)
+        hcf = cf * 3.1 + 1.2
+        if cy >= 2015 or not hgt or (not hc and abs(hcf - hgt) > 4) or (hcf > 1.4 * hgt and hcf - hgt > 6):
+            if not hgt or abs(hcf - hgt) > 1: NCF[0] += 1
+            hgt = hcf
     area = g.area
     if not hgt: hgt = DEFH.get(cls, 6.5 if area < 150 else 9 if area < 900 else 12)
     if owned(tile_of(g.centroid.x, g.centroid.y)):
@@ -974,6 +1010,7 @@ for r in bl:
         if not (hc or ho or r.get('num_floors')): BAUD['no_height_data'] += 1
         hf_ = fl * 3.1 + 1.2
         if 1 <= fl <= 90 and ((hc and hf_ >= 25 and hf_ > 1.6 * hgt) or (not hc and hf_ >= 12 and hf_ > 1.35 * hgt)): BAUD['below_floors'] += 1
+        if 1 <= cf <= 90 and cf * 3.1 + 1.2 > 1.4 * hgt and cf * 3.1 + 1.2 - hgt > 6: BAUD['below_city_floors'] += 1
     if area < 40: hgt = min(hgt, 3.5)
     mh = r.get('min_height') or 0
     hid = int(hashlib.md5(r['id'].encode()).hexdigest()[:8], 16)
@@ -1234,6 +1271,9 @@ chk['lanes_no_lines'] = audit('lanes_no_lines', [i for i, rd in enumerate(roads)
 chk['zebra_few_bars'] = sum(1 for n in ZB if n < 3)
 # a building much lower than its mapped number of floors (Nov 27, Pointe-Nord)
 chk['building_below_floors'] = BAUD['below_floors']
+# buildings clearly lower than the city's own floor count (Nov 28)
+chk['building_below_city_floors'] = BAUD['below_city_floors']
+print('buildings changed to the city\'s floors', NCF[0], flush=True)
 # flat ground (roads, grass, water...) the triangles still don't cover after splitting (Nov 27, Laval)
 chk['surface_holes'] = FILLGAP[1]
 # for information (not a failure): buildings with no height in any source get a typical height for their type
@@ -1245,7 +1285,7 @@ LIMITS = {'wall_at_junction': 0, 'pier_on_road': 0, 'too_high_road': 0, 'roads_w
           # (Nov 27 build #12: 3 roads in the whole city blocked every other fix) the look checks block the map only when
           # a chunk has more than a few; a few are printed with their place ('audit:' lines) to fix in the next round
           'street_no_centre_line': 3, 'divided_half_unpainted': 3, 'lanes_no_lines': 3, 'zebra_few_bars': 3,
-          'building_below_floors': 3, 'buildings_typical_height_pct': 100, 'surface_holes': 0, 'streets_real_width_pct': 101}
+          'building_below_floors': 3, 'buildings_typical_height_pct': 100, 'surface_holes': 0, 'streets_real_width_pct': 101, 'building_below_city_floors': 3}
 failed = [k for k, v in chk.items() if v > LIMITS[k]]
 os.makedirs(os.path.join(OUT, 'checks'), exist_ok=True)
 json.dump({'checks': chk, 'failed': failed, 'where': AUD}, open(os.path.join(OUT, 'checks', ('%d_%d.json' % (TX0, TZ0)) if A.tiles else 'all.json'), 'w'))
