@@ -36,8 +36,8 @@ jobs:
           git fetch --depth 1 origin citybld && git worktree add citybld-data FETCH_HEAD && cp citybld-data/citybld.json.gz data/
       - name: Build before and after
         run: |
-          env ${{ inputs.off }}=1 python builder/build.py data before --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
-          python builder/build.py data after --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
+          export ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}=1; python builder/build.py data before --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
+          unset ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}; python builder/build.py data after --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
       - name: Keep them on the test-tiles branch
         run: |
           set -e
