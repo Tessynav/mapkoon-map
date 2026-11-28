@@ -1,0 +1,52 @@
+# Publishes the tiles of the last "Build map" run again, without building them again (a few minutes, not 2 hours).
+# Use it when a build made all its tiles but the publish step stopped (Nov 27, build #13).
+# Actions > Publish only > Run workflow. Leave "run" empty for the last Build map run.
+name: Publish only
+
+on:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: 'Build map run id (empty = the last one)'
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: build-map
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - id: run
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          R="${{ inputs.run }}"
+          if [ -z "$R" ]; then R=$(gh run list -R "${{ github.repository }}" --workflow build-map.yml --limit 1 --json databaseId -q '.[0].databaseId'); fi
+          echo "using Build map run $R"
+          echo "id=$R" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with: { name: plan, path: plan, run-id: '${{ steps.run.outputs.id }}', github-token: '${{ github.token }}' }
+      - uses: actions/download-artifact@v4
+        with: { pattern: 'tiles-*', path: site, merge-multiple: true, run-id: '${{ steps.run.outputs.id }}', github-token: '${{ github.token }}' }
+      - run: |
+          python builder/merge.py site plan/plan.json plan/idx.json
+          rm -rf site/parts site/checks
+          cp site-files/* site/
+          touch site/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: site }
+      - id: deploy
+        uses: actions/deploy-pages@v4
