@@ -14,22 +14,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Download from donnees.montreal.ca
+      - name: Download from donnees.montreal.ca (or its copy on donneesquebec.ca)
         run: |
-          set -e
+          set -u
           mkdir -p city
+          UA="Mozilla/5.0 (X11; Linux x86_64) MapKoon-builder"
+          ok=0
           for ds in voirie-chaussee-intersection voirie-trottoir-ilot; do
-            curl -sfL "https://donnees.montreal.ca/api/3/action/package_show?id=$ds" -o meta.json
-            jq -r '.result.resources[] | select((.format|ascii_downcase)=="geojson") | .url' meta.json > urls.txt
-            echo "$ds:"; cat urls.txt
-            test -s urls.txt
-            while read -r u; do
-              n=$(basename "${u%%\?*}")
-              curl -sfL "$u" -o "city/$n"
-              gzip -9 -f "city/$n"
-              ls -la "city/$n.gz"
-            done < urls.txt
+            got=0
+            for site in "https://donnees.montreal.ca" "https://www.donneesquebec.ca/recherche"; do
+              for id in "$ds" "vmtl-$ds"; do
+                [ $got = 1 ] && break
+                code=$(curl -sL -A "$UA" -o meta.json -w '%{http_code}' "$site/api/3/action/package_show?id=$id")
+                echo "$site $id -> HTTP $code"
+                [ "$code" = 200 ] || continue
+                jq -r '.result.resources[] | select((.format|ascii_downcase)=="geojson" or (.url|test("geojson";"i"))) | .url' meta.json > urls.txt || continue
+                cat urls.txt; [ -s urls.txt ] || continue
+                while read -r u; do
+                  n=$(basename "${u%%\?*}")
+                  c2=$(curl -sL -A "$UA" -o "city/$n" -w '%{http_code}' "$u"); echo "  $n -> HTTP $c2"
+                  if [ "$c2" = 200 ] && [ -s "city/$n" ]; then gzip -9 -f "city/$n"; ls -la "city/$n.gz"; got=1; else rm -f "city/$n"; fi
+                done < urls.txt
+              done
+            done
+            [ $got = 1 ] && ok=$((ok+1)) || echo "COULD NOT GET $ds"
           done
+          echo "datasets downloaded: $ok of 2"
+          [ $ok -ge 1 ] || exit 1
           echo "Contient des données de la Ville de Montréal, licence CC BY 4.0 (https://donnees.montreal.ca)." > city/CREDIT.txt
           date -u +%Y-%m-%dT%H:%MZ > city/DATE.txt
       - name: Keep them on the city branch
