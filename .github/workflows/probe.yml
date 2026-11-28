@@ -7,8 +7,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: |
+          set +e
+          UA='MapKoon-builder/1.0 (github.com/Tessynav/mapkoon-map)'
           Q='[out:json][timeout:60];node(5274385078);(nwr(around:200,45.441983,-73.441096)["amenity"~"parking_entrance|parking|charging_station"];nwr(around:200,45.441983,-73.441096)["parking"];way(around:120,45.441983,-73.441096)["highway"];);out center tags;'
-          curl -s --data-urlencode "data=$Q" https://overpass-api.de/api/interpreter -o a.json; echo "HTTP done $(wc -c < a.json)"
+          for S in https://overpass-api.de/api/interpreter https://overpass.kumi.systems/api/interpreter https://maps.mail.ru/osm/tools/overpass/api/interpreter; do curl -s -A "$UA" --data-urlencode "data=$Q" $S -o a.json; echo "$S $(wc -c < a.json)"; head -c 200 a.json; echo; jq -e .elements a.json >/dev/null 2>&1 && break; done
           jq -c '.elements[] | {t:.type,id:.id,lat:(.lat//.center.lat),lon:(.lon//.center.lon),tags:.tags}' a.json
           Q2='[out:json][timeout:90];area["ISO3166-2"="CA-QC"]->.q;nwr["amenity"="charging_station"]["brand"~"Tesla"](area.q)->.s;(node(around.s:150)["amenity"="parking_entrance"];);out tags center;'
-          curl -s --data-urlencode "data=$Q2" https://overpass-api.de/api/interpreter -o b.json; echo "QC parking entrances within 150 m of a Tesla charger: $(jq '.elements|length' b.json)"
+          curl -s -A "$UA" --data-urlencode "data=$Q2" $S -o b.json; echo "QC parking entrances within 150 m of a Tesla charger: $(jq '.elements|length' b.json)"
