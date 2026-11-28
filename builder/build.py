@@ -950,6 +950,43 @@ PAL = {'house': ['#a8553f', '#b9a58a', '#d8d2c4', '#8f4a3a', '#c9b79a'], 'reside
        'outbuilding': ['#8d8f93', '#a3a29c']}
 DEFH = {'house': 7.5, 'detached': 7.5, 'residential': 8.5, 'apartments': 13, 'commercial': 7, 'retail': 6, 'industrial': 8,
         'outbuilding': 3.2, 'garage': 3, 'shed': 2.6, 'school': 10, 'church': 14}
+# (Nov 28: Pointe-Nord's towers) OpenStreetMap building parts with their floors (osm.py -> osm_bld.json): where parts
+# cover most of a building's outline, the parts are drawn (tower, podium...) instead of the outline at one height
+NPART = [0, 0]
+try:
+    _op = os.path.join(D, 'osm_bld.json')
+    if os.path.exists(_op):
+        from shapely.strtree import STRtree as _STR2
+        _ab = AREA.bounds; parts_ = []
+        for o_ in json.load(open(_op)):
+            if not o_['p']: continue
+            ring_ = [((x - LON0) * KX, -(y - LAT0) * KY) for x, y in o_['r']]
+            xs_ = [q[0] for q in ring_]; zs_ = [q[1] for q in ring_]
+            if max(xs_) < _ab[0] or min(xs_) > _ab[2] or max(zs_) < _ab[1] or min(zs_) > _ab[3]: continue
+            P_ = Polygon(ring_)
+            if not P_.is_valid: P_ = P_.buffer(0)
+            if P_.is_empty or P_.area < 8: continue
+            parts_.append((P_, o_))
+        if parts_:
+            _pt = _STR2([q[0] for q in parts_]); used_ = set(); skip_ = set(); add_ = []
+            for r in bl:
+                g_ = r['g']
+                if g_.geom_type not in ('Polygon', 'MultiPolygon') or g_.area < 30: continue
+                hits_ = [int(j) for j in _pt.query(g_) if parts_[int(j)][0].intersects(g_)]
+                if not hits_: continue
+                cov_ = unary_union([parts_[j][0] for j in hits_]).intersection(g_).area / g_.area
+                if cov_ < 0.6: continue
+                skip_.add(r['id'])
+                for j in hits_:
+                    if j in used_ or parts_[j][0].intersection(g_).area < 0.5 * parts_[j][0].area: continue
+                    used_.add(j); P_, o_ = parts_[j]
+                    add_.append({'id': 'osm-' + o_['id'], 'g': P_, 'height': o_['h'], 'min_height': o_['b'] or None, 'class': r.get('class'),
+                                 'facade_color': r.get('facade_color'), 'roof_shape': None, 'num_floors': None})
+            bl = [r for r in bl if r['id'] not in skip_] + add_
+            NPART[0] = len(skip_); NPART[1] = len(add_)
+        print('buildings drawn from their OpenStreetMap parts', NPART[0], 'parts', NPART[1], flush=True)
+except Exception as _e:
+    print('building parts skipped:', _e, flush=True)
 NFL = [0]; BAUD = {'buildings': 0, 'no_height_data': 0, 'below_floors': 0, 'below_city_floors': 0}
 # (Nov 28) the City of Montréal's assessment roll: floors above ground and year built for every lot (citybld.py). Each
 # lot's floors go to the biggest building on it (a lot with a tower and its small garage: the tower)
@@ -969,7 +1006,7 @@ try:
             _t = _STR(_lots); best_ = {}
             for i_, r in enumerate(bl):
                 g_ = r['g']
-                if g_.geom_type not in ('Polygon', 'MultiPolygon'): continue
+                if g_.geom_type not in ('Polygon', 'MultiPolygon') or str(r['id']).startswith('osm-'): continue   # (parts keep their own floors)
                 c_ = g_.representative_point(); fl_ = 0; yr_ = 0; lot_ = None
                 for j_ in _t.query(c_, predicate='within'):
                     if _lf[j_][0] > fl_: fl_, yr_, lot_ = _lf[j_][0], _lf[j_][1], int(j_)

@@ -42,6 +42,33 @@ def width(cls, ow, ramp, lanes, t):
     return W1.get(cls, 6) if ow else W2.get(cls, 8)
 
 
+def _num(v):
+    try: return float(str(v).split(';')[0].replace('m', '').replace(',', '.').strip())
+    except Exception: return None
+
+
+class Bld(osmium.SimpleHandler):
+    """buildings and building parts with a height or floors: outline (lon, lat), height, base height, part or not"""
+    def __init__(self):
+        super().__init__(); self.out = []
+
+    def area(self, a):
+        t = a.tags; part = 'building:part' in t and t.get('building:part') != 'no'
+        if not part and 'building' not in t: return
+        h = _num(t.get('height')); lv = _num(t.get('building:levels'))
+        mh = _num(t.get('min_height')); ml = _num(t.get('building:min_level'))
+        if not h and not lv: return
+        if not h: h = lv * 3.1 + 1.2 + (_num(t.get('roof:levels')) or 0) * 2.5
+        if h <= 0 or h > 400: return
+        base = mh if mh is not None else (ml * 3.1 if ml else 0)
+        try:
+            for outer in a.outer_rings():
+                ring = [[round(n.lon, 7), round(n.lat, 7)] for n in outer]
+                if len(ring) >= 4: self.out.append({'r': ring, 'h': round(h, 1), 'b': round(base, 1), 'p': 1 if part else 0, 'id': ('w' if a.from_way() else 'r') + str(a.orig_id())})
+        except Exception:
+            pass
+
+
 class H(osmium.SimpleHandler):
     def __init__(self):
         super().__init__(); self.out = {}
@@ -93,6 +120,14 @@ if __name__ == '__main__':
     subprocess.run(['osmium', 'extract', '-b', bb, '-s', 'smart', '--overwrite', '-o', cut, src], check=True)
     h = H(); h.apply_file(cut)
     json.dump(h.out, open(out, 'w'), separators=(',', ':'))
+    # (Nov 28: Pointe-Nord's towers, 25 to 36 floors, are mapped as building parts with their floors; Overture has the
+    # outline but no height, so they came out 4-16 floors) every building and building part with floors or a height
+    try:
+        B = Bld(); B.apply_file(cut, locations=True)
+        json.dump(B.out, open(os.path.join(os.path.dirname(out) or '.', 'osm_bld.json'), 'w'), separators=(',', ':'))
+        print('OpenStreetMap buildings and parts with floors or a height', len(B.out), 'parts', sum(1 for b in B.out if b['p']), flush=True)
+    except Exception as e:
+        print('OpenStreetMap building heights skipped:', e, flush=True)
     print('roads with OpenStreetMap details', sum(1 for v in h.out.values() if 'ln' in v), 'with lanes', sum(1 for v in h.out.values() if v.get('ln')),
           'crosswalks with a type', sum(1 for v in h.out.values() if 'ln' not in v), flush=True)
     for f in (cut,) + (() if len(sys.argv) > 3 else (src,)): os.remove(f)

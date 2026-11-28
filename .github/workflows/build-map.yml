@@ -100,6 +100,7 @@ jobs:
           read T B < <(python -c "import json;c=[c for c in json.load(open('plan/plan.json'))['chunks'] if c['id']=='${{ matrix.chunk }}'][0];print(c['tiles'],c['bbox'])")
           python builder/overture.py read plan/idx.json "$B" data
           cp plan/osm_ways.json data/
+          cp plan/osm_bld.json data/ 2>/dev/null || echo 'no OpenStreetMap building heights file'
           cp plan/city.json.gz data/ 2>/dev/null || echo 'no city widths file: estimated widths'
           cp plan/citybld.json.gz data/ 2>/dev/null || echo 'no city floors file'
           python builder/build.py data out --tiles="$T" --heights h

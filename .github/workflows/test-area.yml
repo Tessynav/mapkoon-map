@@ -33,11 +33,13 @@ jobs:
           python builder/overture.py read idx.json "$W,$S,$E,$N" data
           python builder/heights.py "${{ inputs.borough }}" plan/plan.json idx.json "h/heights_${{ inputs.borough }}.json"
           git fetch --depth 1 origin city && git worktree add city-data FETCH_HEAD && python builder/city.py prep city-data data/city.json.gz
+          sudo apt-get update -q > /dev/null && sudo apt-get install -y -q osmium-tool > /dev/null
+          python builder/osm.py "$W,$S,$E,$N" data/osm_ways.json
           git fetch --depth 1 origin citybld && git worktree add citybld-data FETCH_HEAD && cp citybld-data/citybld.json.gz data/
       - name: Build before and after
         run: |
-          export ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}=1; python builder/build.py data before --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
-          unset ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}; python builder/build.py data after --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights"
+          export ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}=1; python builder/build.py data before --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights|parts"
+          unset ${{ inputs.off || 'MAPKOON_NO_CITYFLOORS' }}; python builder/build.py data after --tiles="$TL" --pad 0 --heights h | grep -E "checks|city|floors|heights|parts"
       - name: Keep them on the test-tiles branch
         run: |
           set -e
