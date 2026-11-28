@@ -5,7 +5,11 @@ from plan import LON0, LAT0, KX, KY, T
 
 site = sys.argv[1]; plan = json.load(open(sys.argv[2]))
 tiles = []
-for f in glob.glob(os.path.join(site, 'parts', '*.json')):
+# (Nov 27) every part of the map must be here: a publish with parts missing left holes (south Nuns' Island)
+_parts = glob.glob(os.path.join(site, 'parts', '*.json'))
+print('map parts', len(_parts), 'of', len(plan['chunks']))
+if len(_parts) < len(plan['chunks']): sys.exit('map parts missing, not publishing (the live map stays as it was)')
+for f in _parts:
     tiles += json.load(open(f))['tiles']
 tiles.sort()
 nets = sorted(os.path.basename(f)[:-8] for f in glob.glob(os.path.join(site, 'n', '*.json.gz')))

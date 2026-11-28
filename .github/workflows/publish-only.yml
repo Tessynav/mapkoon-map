@@ -38,8 +38,15 @@ jobs:
           echo "id=$R" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with: { name: plan, path: plan, run-id: '${{ steps.run.outputs.id }}', github-token: '${{ github.token }}' }
-      - uses: actions/download-artifact@v4
-        with: { pattern: 'tiles-*', path: site, merge-multiple: true, run-id: '${{ steps.run.outputs.id }}', github-token: '${{ github.token }}' }
+      # (Nov 27, Publish only #2: the download step above only saw the first 100 of the run's 154 artifacts, so 34 parts
+      # of the map were left out, south Nuns' Island among them) gh lists them all; each part is checked in below
+      - env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          gh run download "${{ steps.run.outputs.id }}" -R "${{ github.repository }}" -p 'tiles-*' -D parts_dl
+          n=$(ls parts_dl | wc -l); echo "map parts downloaded: $n"
+          mkdir -p site && for d in parts_dl/*/; do cp -r "$d". site/; done
+          E=$(python -c "import json;print(len(json.load(open('plan/plan.json'))['chunks']))"); echo "map parts expected: $E"
+          [ "$n" -ge "$E" ] || { echo "missing map parts: not publishing (the live map stays as it was)"; exit 1; }
       - run: |
           python builder/merge.py site plan/plan.json plan/idx.json
           rm -rf site/parts site/checks
