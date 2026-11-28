@@ -49,6 +49,11 @@ jobs:
         run: |
           git fetch --depth 1 origin city && git worktree add city-data FETCH_HEAD
           python builder/city.py prep city-data plan/city.json.gz
+      - name: Floors and year built from the City of Montréal (the "citybld" branch, made by Get city buildings)
+        continue-on-error: true
+        run: |
+          git fetch --depth 1 origin citybld && git worktree add citybld-data FETCH_HEAD
+          cp citybld-data/citybld.json.gz plan/
       - uses: actions/upload-artifact@v4
         with: { name: plan, path: plan/, retention-days: 2 }
 
@@ -96,6 +101,7 @@ jobs:
           python builder/overture.py read plan/idx.json "$B" data
           cp plan/osm_ways.json data/
           cp plan/city.json.gz data/ 2>/dev/null || echo 'no city widths file: estimated widths'
+          cp plan/citybld.json.gz data/ 2>/dev/null || echo 'no city floors file'
           python builder/build.py data out --tiles="$T" --heights h
       - uses: actions/upload-artifact@v4
         with: { name: 'tiles-${{ matrix.chunk }}', path: out/, retention-days: 2 }
