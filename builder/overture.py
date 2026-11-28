@@ -9,7 +9,7 @@ import fsspec, pyarrow.parquet as pq, pyarrow.compute as pc
 
 BASE = 'https://overturemaps-us-west-2.s3.us-west-2.amazonaws.com/'
 # our name -> (theme, type)
-TYPES = {'bld': ('buildings', 'building'), 'segment': ('transportation', 'segment'), 'land_use': ('base', 'land_use'),
+TYPES = {'bld': ('buildings', 'building'), 'bpart': ('buildings', 'building_part'), 'segment': ('transportation', 'segment'), 'land_use': ('base', 'land_use'),
          'water': ('base', 'water'), 'land_cover': ('base', 'land_cover'), 'infrastructure': ('base', 'infrastructure'),
          'land': ('base', 'land')}
 
