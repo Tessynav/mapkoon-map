@@ -1041,7 +1041,10 @@ for r in bl:
     cf, cy = CITYF.get(r['id'], (0, 0))
     if 1 <= cf <= 90 and os.environ.get('MAPKOON_NO_CITYFLOORS') != '1':   # (the env switch: for a before/after test)
         hcf = cf * 3.1 + 1.2
-        if cy >= 2015 or not hgt or (not hc and abs(hcf - hgt) > 4) or (hcf > 1.4 * hgt and hcf - hgt > 6):
+        # (Nov 28, downtown test: lowering buildings that have their own mapped floors made 34 of them too short) the
+        # city's floors only make a building lower when nothing else says how tall it is
+        lower_ok = not fl and not ho
+        if (not hgt) or (hcf > hgt and (cy >= 2015 or not hc or (hcf > 1.4 * hgt and hcf - hgt > 6))) or (lower_ok and (cy >= 2015 or not hc) and abs(hcf - hgt) > 4):
             if not hgt or abs(hcf - hgt) > 1: NCF[0] += 1
             hgt = hcf
     area = g.area
