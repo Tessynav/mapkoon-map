@@ -29,14 +29,14 @@ def num(v):
 for f in F:
     p = f.get('properties') or {}; g = f.get('geometry')
     if not g: continue
-    fl = num(p.get('NOMBRE_ETAGE') or p.get('nombre_etage') or 0)
+    fl = num(p.get('ETAGE_HORS_SOL') or p.get('NOMBRE_ETAGE') or 0)
     yr = num(p.get('ANNEE_CONSTRUCTION') or p.get('annee_construction') or 0)
     if fl <= 0: continue
     nf += 1; ny += 1 if yr > 1800 else 0
     polys = [g['coordinates']] if g['type'] == 'Polygon' else g['coordinates'] if g['type'] == 'MultiPolygon' else []
     for poly in polys:
         ring = [[round((x - LON0) * KX, 1), round(-(y - LAT0) * KY, 1)] for x, y, *_ in poly[0]]
-        if len(ring) >= 4: out.append([ring, fl, yr if yr > 1800 else 0])
+        if len(ring) >= 4: out.append([ring, fl, yr if yr > 1800 else 0, num(p.get('NOMBRE_LOGEMENT') or 0)])
 print('lots with floors', nf, 'with year', ny, 'kept', len(out))
 with gzip.open(sys.argv[2], 'wt') as fo: json.dump({'lots': out, 'credit': 'Ville de Montréal, CC BY 4.0'}, fo, separators=(',', ':'))
 import os; print('written', sys.argv[2], os.path.getsize(sys.argv[2]) // 1024, 'KB')
