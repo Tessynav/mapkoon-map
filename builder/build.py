@@ -977,16 +977,17 @@ try:
                 cov_ = unary_union([parts_[j][0] for j in hits_]).intersection(g_).area / g_.area
                 # parts covering most of the outline: they replace it. Otherwise (often only the tower has its floors
                 # mapped): the outline stays as the base, and each part clearly taller than a base stands on it
-                whole_ = cov_ >= 0.6
-                if whole_: skip_.add(r['id'])
+                whole_ = cov_ >= 0.6; low_ = []
                 for j in hits_:
                     if j in used_ or parts_[j][0].intersection(g_).area < 0.5 * parts_[j][0].area: continue
                     if not whole_ and parts_[j][1]['h'] < 20: continue
-                    used_.add(j); P_, o_ = parts_[j]; HASPART.add(r['id'])
+                    used_.add(j); P_, o_ = parts_[j]; HASPART.add(r['id']); low_.append(o_['h'])
                     add_.append({'id': 'osm-' + o_['id'], 'g': P_, 'height': o_['h'], 'min_height': o_['b'] or None, 'class': r.get('class'),
                                  'facade_color': r.get('facade_color'), 'roof_shape': None, 'num_floors': None})
-            bl = [r for r in bl if r['id'] not in skip_] + add_
-            NPART[0] = len(skip_); NPART[1] = len(add_)
+                # (the outline stays under its parts, no taller than the lowest one, so nothing is left open between them)
+                if whole_ and low_: r['cap'] = max(4.0, min(low_))
+            bl = bl + add_
+            NPART[0] = len(HASPART); NPART[1] = len(add_)
         print('buildings drawn from their OpenStreetMap parts', NPART[0], 'parts', NPART[1], flush=True)
 except Exception as _e:
     print('building parts skipped:', _e, flush=True)
@@ -1045,6 +1046,7 @@ for r in bl:
             hgt = hcf
     area = g.area
     if not hgt: hgt = DEFH.get(cls, 6.5 if area < 150 else 9 if area < 900 else 12)
+    if r.get('cap'): hgt = min(hgt, r['cap'])
     if owned(tile_of(g.centroid.x, g.centroid.y)):
         BAUD['buildings'] += 1
         if not (hc or ho or r.get('num_floors')): BAUD['no_height_data'] += 1
